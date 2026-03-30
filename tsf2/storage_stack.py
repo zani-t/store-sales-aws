@@ -1,8 +1,9 @@
 from aws_cdk import (
     Stack,
     aws_s3 as s3,
-    RemovalPolicy,
     aws_dynamodb as dynamodb,
+    CfnOutput,
+    RemovalPolicy,
 )
 from constructs import Construct
 
@@ -21,6 +22,10 @@ class StorageStack(Stack):
             removal_policy=removal,
             auto_delete_objects=(env_name != "prod")
         )
+        CfnOutput(self, "DataBucketName", 
+            value=self.bucket.bucket_name,
+            export_name=f"{env_name}-DataBucketName"
+        )
 
         # Model storage bucket
         self.model_bucket = s3.Bucket(self, "Tsf2ModelBucket",
@@ -29,6 +34,10 @@ class StorageStack(Stack):
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=removal,
             auto_delete_objects=(env_name != "prod")
+        )
+        CfnOutput(self, "ModelBucketName",
+            value=self.model_bucket.bucket_name,
+            export_name=f"{env_name}-ModelBucketName"
         )
     
         # DynamoDB table for job metadata
