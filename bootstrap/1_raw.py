@@ -222,7 +222,7 @@ def upload_to_s3(s3_bucket_name):
         print(f"✓ Bucket accessible")
         
         # Upload historical data
-        print(f"\n[S3] Uploading historical data to s3://{s3_bucket_name}/historical/")
+        print(f"\n[S3] Uploading historical data to s3://{s3_bucket_name}/raw/historical/")
         
         if not HISTORICAL_DIR.exists():
             print(f"Error: Historical directory not found: {HISTORICAL_DIR}")
@@ -230,7 +230,7 @@ def upload_to_s3(s3_bucket_name):
         
         uploaded_count = 0
         for csv_file in HISTORICAL_DIR.glob('*.csv'):
-            s3_key = f"historical/{csv_file.name}"
+            s3_key = f"raw/historical/{csv_file.name}"
             try:
                 print(f"  Uploading {csv_file.name}...", end=" ")
                 s3_client.upload_file(
@@ -247,7 +247,7 @@ def upload_to_s3(s3_bucket_name):
         
         print(f"\n✓ Successfully uploaded {uploaded_count} file(s) to S3")
         print(f"  Bucket: {s3_bucket_name}")
-        print(f"  Path: s3://{s3_bucket_name}/historical/")
+        print(f"  Path: s3://{s3_bucket_name}/raw/historical/")
         
         return True
         
@@ -297,7 +297,7 @@ def main(env_name):
         if upload_success:
             print("\n[5b/5] Cleaning up local historical data...")
             cleanup_local_historical()
-            write_marker(s3_bucket_name, "historical/")
+            write_marker(s3_bucket_name, "raw/historical/")
         else:
             print("Upload failed. Aborting.")
             sys.exit(1)
