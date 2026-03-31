@@ -8,6 +8,7 @@ import sys
 import subprocess
 import shutil
 import zipfile
+import tempfile
 from pathlib import Path
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -25,15 +26,15 @@ KAGGLE_COMPETITION = 'store-sales-time-series-forecasting'
 CUTOFF_DATE = pd.Timestamp('2017-07-15')
 DATASET_NAMES = ['holidays_events', 'oil', 'stores', 'train', 'transactions']
 
-# Directory paths - all operations in bootstrap/ directory
-SCRIPT_DIR = Path(__file__).parent
-EXTRACT_DIR = SCRIPT_DIR / KAGGLE_COMPETITION
-HISTORICAL_DIR = SCRIPT_DIR / 'historical'
-ZIP_PATH = SCRIPT_DIR / f'{KAGGLE_COMPETITION}.zip'
+# Create temporary directory for all local operations
+TEMP_DIR = Path(tempfile.mkdtemp(prefix='raw_data_'))
+EXTRACT_DIR = TEMP_DIR / KAGGLE_COMPETITION
+HISTORICAL_DIR = TEMP_DIR / 'historical'
+ZIP_PATH = TEMP_DIR / f'{KAGGLE_COMPETITION}.zip'
 
 
 def download_and_extract():
-    """Download dataset from Kaggle and extract it to bootstrap directory."""
+    """Download dataset from Kaggle and extract it to temporary directory."""
     import subprocess
     
     # Check if kaggle CLI is installed and configured
@@ -50,9 +51,9 @@ def download_and_extract():
         print("Configure credentials: https://github.com/Kaggle/kaggle-api#api-credentials")
         sys.exit(1)
     
-    # Change to script directory for download
+    # Change to temporary directory for download
     original_cwd = os.getcwd()
-    os.chdir(SCRIPT_DIR)
+    os.chdir(TEMP_DIR)
     
     try:
         # Remove old extracted directory and zip if they exist
@@ -171,28 +172,17 @@ def load_and_split_data():
     print("\n✓ All datasets successfully loaded and split!")
 
 
-def cleanup_downloaded_data():
-    """Remove the original extracted and downloaded files to save space."""
-    if EXTRACT_DIR.exists():
-        print(f"Cleaning up extracted directory: {EXTRACT_DIR}")
+def cleanup_temp_files():
+    """Remove temporary directory after processing."""
+    if TEMP_DIR.exists():
+        print(f"\n[CLEANUP] Removing temporary directory: {TEMP_DIR}")
         try:
-            shutil.rmtree(EXTRACT_DIR)
-            print(f"✓ Removed: {EXTRACT_DIR}")
+            shutil.rmtree(TEMP_DIR)
+            print(f"✓ Cleaned up temporary files")
         except Exception as e:
-            print(f"Error removing {EXTRACT_DIR}: {e}")
-            sys.exit(1)
-
-
-def cleanup_local_historical():
-    """Remove local historical directory after successful S3 upload."""
-    if HISTORICAL_DIR.exists():
-        print(f"\nCleaning up local historical directory: {HISTORICAL_DIR}")
-        try:
-            shutil.rmtree(HISTORICAL_DIR)
-            print(f"✓ Removed: {HISTORICAL_DIR}")
-        except Exception as e:
-            print(f"Error removing {HISTORICAL_DIR}: {e}")
-            sys.exit(1)
+            print(f"✗ Error removing {TEMP_DIR}: {e}")
+            return False
+    return True
 
 
 def upload_to_s3(s3_bucket_name):
@@ -286,31 +276,31 @@ def main(env_name):
         print("\n[3/5] Loading and splitting data...")
         load_and_split_data()
         
-        # Clean up extracted directory
-        print("\n[4/5] Cleaning up downloaded files...")
-        cleanup_downloaded_data()
-        
         # Upload to S3
-        print("\n[5a/5] Uploading to S3...")
+        print("\n[4/5] Uploading to S3...")
         upload_success = upload_to_s3(s3_bucket_name)
         
         if upload_success:
-            print("\n[5b/5] Cleaning up local historical data...")
-            cleanup_local_historical()
             write_marker(s3_bucket_name, "raw/historical/")
         else:
             print("Upload failed. Aborting.")
+            cleanup_temp_files()
             sys.exit(1)
         
         print("\n" + "=" * 60)
         print("✓ Process completed successfully!")
         print("=" * 60)
         
+        # Clean up temporary directory
+        cleanup_temp_files()
+        
     except KeyboardInterrupt:
         print("\n\nProcess interrupted by user.")
+        cleanup_temp_files()
         sys.exit(130)
     except Exception as e:
         print(f"\n\nUnexpected error: {e}")
+        cleanup_temp_files()
         sys.exit(1)
 
 
