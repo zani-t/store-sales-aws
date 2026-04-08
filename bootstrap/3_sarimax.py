@@ -25,7 +25,13 @@ from botocore.exceptions import ClientError
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tools.sm_exceptions import ValueWarning, ConvergenceWarning
 
-from bootstrap import get_stack_output, marker_exists, write_marker
+from bootstrap import (
+    get_stack_output,
+    marker_exists,
+    write_marker,
+    load_time_series,
+    SIGNIFICANT_EXOG
+    )
 
 # Suppress warnings
 warnings.filterwarnings('ignore', category=ValueWarning)
@@ -38,9 +44,6 @@ STORE_DIR = TEMP_DIR / 'store'
 
 # S3 output paths
 S3_OUTPUT_PREFIX = 'sarimax/historical/'
-
-# Exogenous variables used in model training
-SIGNIFICANT_EXOG = ['hmv', 'exists_promotion', 'exists_transaction']
 
 
 def ensure_directories_exist():
@@ -90,37 +93,6 @@ def download_from_s3(s3_client, bucket_name):
         print(f"✗")
         print(f"  Error: {e}")
         return None
-
-
-def build_time_series(train):
-    """Build time series aggregations per family and per store.
-    
-    Args:
-        train: DataFrame with processed training data
-    
-    Returns:
-        tuple: (ts_per_family dict, ts_per_store dict)
-    """
-    print(f"\n[TIMESERIES] Building time series aggregations")
-    
-    exog = {feature: 'mean' for feature in ['sales'] + SIGNIFICANT_EXOG}
-    
-    ts_per_family = {}
-    ts_per_store = {}
-    
-    print(f"  Building time series per family...")
-    for f in train['family'].unique():
-        ts_per_family[f] = train.loc[train['family'] == f].groupby(['date']).agg(exog)
-    print(f"    ✓ {len(ts_per_family)} families")
-    
-    print(f"  Building time series per store...")
-    for s in range(1, 55):
-        store_data = train.loc[train['store_nbr'] == s]
-        if len(store_data) > 0:
-            ts_per_store[s] = store_data.groupby(['date']).agg(exog)
-    print(f"    ✓ {len(ts_per_store)} stores")
-    
-    return ts_per_family, ts_per_store
 
 
 def train_family_models(ts_per_family):
@@ -334,7 +306,7 @@ def main(env_name):
         s3_client = boto3.client('s3')
         
         # Check for marker file indicating processed data is ready
-        print("\n[1/7] Checking for processed data marker...")
+        print("\n[1/6] Checking for processed data marker...")
         if not marker_exists(data_bucket_name, "processed/sarimax-prime/historical/"):
             print("✗ Error: Processed data not found at s3://{}/processed/sarimax-prime/historical/_COMPLETE".format(data_bucket_name))
             print("  Please run: python bootstrap/2_sarimax_prime.py {}".format(env_name))
@@ -342,36 +314,32 @@ def main(env_name):
         print("✓ Marker found. Processed data is ready.")
         
         # Check if model training has already been completed
-        print("\n[2/7] Checking if model training has already been completed...")
+        print("\n[2/6] Checking if model training has already been completed...")
         if marker_exists(model_bucket_name, S3_OUTPUT_PREFIX):
             print("✗ Error: Model training workflow has already been completed.")
             print(f"  Models exist at s3://{model_bucket_name}/{S3_OUTPUT_PREFIX}_COMPLETE")
             sys.exit(0)
         print("✓ No marker found. Ready to proceed with training.")
         
-        # Download from S3
-        print("\n[3/7] Downloading processed data from S3...")
-        train = download_from_s3(s3_client, data_bucket_name)
+        # Load time series
+        print("\n[3/6] Loading time series from S3...")
+        ts_per_family, ts_per_store = load_time_series(s3_client, data_bucket_name)
         
-        if train is None:
-            print("Error: Failed to download data from S3")
+        if ts_per_family is None or ts_per_store is None:
+            print("Error: Failed to load time series from S3")
             sys.exit(1)
         
-        # Build time series
-        print("\n[4/7] Building time series aggregations...")
-        ts_per_family, ts_per_store = build_time_series(train)
-        
         # Train models
-        print("\n[5/7] Training SARIMAX models...")
+        print("\n[4/6] Training SARIMAX models...")
         smx_per_family = train_family_models(ts_per_family)
         smx_per_store = train_store_models(ts_per_store)
         
         # Save models to temp directory
-        print("\n[6/7] Saving models to temporary directory...")
+        print("\n[5/6] Saving models to temporary directory...")
         save_models(smx_per_family, smx_per_store)
         
         # Upload to S3
-        print("\n[7/7] Uploading models to S3...")
+        print("\n[6/6] Uploading models to S3...")
         upload_success = upload_to_s3(s3_client, model_bucket_name)
         
         if not upload_success:

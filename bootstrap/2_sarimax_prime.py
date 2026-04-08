@@ -22,11 +22,52 @@ import boto3
 from scipy.stats import boxcox
 from botocore.exceptions import ClientError
 
-from bootstrap import get_stack_output, marker_exists, write_marker
+from bootstrap import (
+    get_stack_output,
+    marker_exists,
+    write_marker,
+    family_encode
+    )
 
 # Dataset names to process
 DATASET_NAMES = ['holidays_events', 'oil', 'stores', 'train', 'transactions']
 OUTPUT_PREFIX = 'processed/sarimax-prime/historical/'
+TIMESERIES_FAMILY_PREFIX = 'processed/sarimax-prime/historical/family/'
+TIMESERIES_STORE_PREFIX = 'processed/sarimax-prime/historical/store/'
+
+# Time series construction parameters
+PERIOD_MAP = {
+    0.25: '2017-05-15',
+    0.5: '2017-02-15',
+    1: '2016-08-15',
+    1.5: '2016-02-15',
+    2.5: '2015-02-15',
+    3.5: '2014-02-15',
+    4: '2013-01-01'
+}
+
+NON_TWO_YEAR_FAMILIES = {
+    'BABY CARE': 1.5, 'BOOKS': 0.5, 'LAWN AND GARDEN': 0.5, 'LIQUOR,WINE,BEER': 1,
+    'MAGAZINES': 1.5, 'AUTOMOTIVE': 4, 'BEAUTY': 4, 'BREAD/BAKERY': 4, 'CLEANING': 4,
+    'DAIRY': 3.5, 'DELI': 4, 'EGGS': 4, 'FROZEN FOODS': 4, 'GROCERY I': 4,
+    'GROCERY II': 4, 'LINGERIE': 4, 'MEATS': 4, 'PERSONAL CARE': 4, 'POULTRY': 3.5,
+    'PREPARED FOODS': 4, 'SEAFOOD': 2.5, 'SCHOOL AND OFFICE SUPPLIES': 1
+}
+
+TWO_YEAR_FAMILIES = {
+    'BEVERAGES', 'CELEBRATION', 'HARDWARE', 'HOME AND KITCHEN I', 'HOME AND KITCHEN II',
+    'HOME APPLIANCES', 'HOME CARE', 'LADIESWEAR', 'PET SUPPLIES', 'PLAYERS AND ELECTRONICS', 'PRODUCE'
+}
+
+NON_TWO_YEAR_STORES = {21: 1, 22: 1.5, 25: 0.5, 42: 1.5, 52: 0.25, 53: 1}
+TWO_YEAR_STORES = {*range(1, 21), 23, 24, *range(26, 42), *range(43, 52), 54}
+
+EXOG_FEATURES = {feature: 'mean' for feature in [
+    'sales', 'onpromotion', 'transactions', 'ntl_holiday', 'rgnl_holiday', 'lcl_holiday', 'hmv', 'exists_promotion',
+    'exists_transaction', 'oil_price_status', 'low_oil_price', 'high_oil_price', 'holiday_type_Additional',
+    'holiday_type_Bridge', 'holiday_type_Event', 'holiday_type_Holiday', 'holiday_type_Transfer',
+    'holiday_type_TransferredHoliday', 'holiday_type_Work Day'
+]}
 
 # Create temporary directory for local processing
 TEMP_DIR = Path(tempfile.mkdtemp(prefix='sarimax_prime_'))
@@ -242,6 +283,18 @@ def upload_to_s3(s3_client, bucket_name, processed_data, lambdas):
         print(f"  Uploading {s3_key}...", end=" ")
         s3_client.upload_fileobj(lambdas_buffer, bucket_name, s3_key)
         print(f"✓")
+
+        # Upload families filename mapping as JSON
+        family_mapping = {family_encode(k): k for k in (NON_TWO_YEAR_FAMILIES.keys() | TWO_YEAR_FAMILIES)}
+        mapping_buffer = BytesIO()
+        mapping_json = json.dumps(family_mapping, indent=2)
+        mapping_buffer.write(mapping_json.encode('utf-8'))
+        mapping_buffer.seek(0)
+
+        s3_key = f"{OUTPUT_PREFIX}families_mapping.json"
+        print(f"  Uploading {s3_key}...", end=" ")
+        s3_client.upload_fileobj(mapping_buffer, bucket_name, s3_key)
+        print(f"✓")
         
         print(f"\n✓ Successfully uploaded processed data to S3")
         print(f"  Bucket: {bucket_name}")
@@ -256,6 +309,102 @@ def upload_to_s3(s3_client, bucket_name, processed_data, lambdas):
     except Exception as e:
         print(f"✗")
         print(f"  Error: {e}")
+        return False
+
+
+def build_and_upload_time_series(s3_client, bucket_name, processed_data):
+    """Build time series aggregations and upload to S3.
+    
+    Args:
+        s3_client: Boto3 S3 client
+        bucket_name: S3 bucket name
+        processed_data: Processed training DataFrame
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    print(f"\n[TIMESERIES] Building aggregated time series per family and store")
+    
+    ts_per_family = {}
+    ts_per_store = {}
+    
+    try:
+        # Build time series per family
+        print(f"  Building time series per family...")
+        for f in processed_data['family'].unique():
+            if f in NON_TWO_YEAR_FAMILIES:
+                ts_per_family[f] = processed_data.loc[
+                    (processed_data['date'] > PERIOD_MAP[NON_TWO_YEAR_FAMILIES[f]]) &
+                    (processed_data['family'] == f)
+                ].groupby(['date']).agg(EXOG_FEATURES)
+            elif f in TWO_YEAR_FAMILIES:
+                ts_per_family[f] = processed_data.loc[
+                    (processed_data['date'] > '2015-08-15') & (processed_data['family'] == f)
+                ].groupby(['date']).agg(EXOG_FEATURES)
+        print(f"    ✓ Built time series for {len(ts_per_family)} families")
+        
+        # Build time series per store
+        print(f"  Building time series per store...")
+        for s in range(1, 55):
+            if s in NON_TWO_YEAR_STORES:
+                store_data = processed_data.loc[
+                    (processed_data['date'] > PERIOD_MAP[NON_TWO_YEAR_STORES[s]]) &
+                    (processed_data['store_nbr'] == s)
+                ].groupby(['date']).agg(EXOG_FEATURES)
+            elif s in TWO_YEAR_STORES:
+                store_data = processed_data.loc[
+                    (processed_data['date'] > '2015-08-15') & (processed_data['store_nbr'] == s)
+                ].groupby(['date']).agg(EXOG_FEATURES)
+            else:
+                continue
+            
+            if len(store_data) > 0:
+                ts_per_store[s] = store_data
+        print(f"    ✓ Built time series for {len(ts_per_store)} stores")
+        
+        # Upload family time series
+        print(f"\n[S3] Uploading family time series to s3://{bucket_name}/{TIMESERIES_FAMILY_PREFIX}")
+        for f, ts_data in ts_per_family.items():
+            try:
+                parquet_buffer = BytesIO()
+                ts_data.to_parquet(parquet_buffer, index=True)
+                parquet_buffer.seek(0)
+                
+                s3_key = f"{TIMESERIES_FAMILY_PREFIX}{family_encode(f)}.parquet"
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=s3_key,
+                    Body=parquet_buffer.getvalue()
+                )
+            except Exception as e:
+                print(f"    ✗ Error uploading family '{f}': {e}")
+                return False
+        print(f"  ✓ Uploaded {len(ts_per_family)} family time series")
+        
+        # Upload store time series
+        print(f"\n[S3] Uploading store time series to s3://{bucket_name}/{TIMESERIES_STORE_PREFIX}")
+        for s, ts_data in ts_per_store.items():
+            try:
+                parquet_buffer = BytesIO()
+                ts_data.to_parquet(parquet_buffer, index=True)
+                parquet_buffer.seek(0)
+                
+                s3_key = f"{TIMESERIES_STORE_PREFIX}store_{s:02d}.parquet"
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=s3_key,
+                    Body=parquet_buffer.getvalue()
+                )
+            except Exception as e:
+                print(f"    ✗ Error uploading store {s}: {e}")
+                return False
+        print(f"  ✓ Uploaded {len(ts_per_store)} store time series")
+        
+        print(f"\n✓ Successfully uploaded time series to S3")
+        return True
+        
+    except Exception as e:
+        print(f"  ✗ Error building time series: {e}")
         return False
 
 
@@ -294,7 +443,7 @@ def main(env_name):
         s3_client = boto3.client('s3')
         
         # Check for marker file indicating raw data is ready
-        print("[1/6] Checking for historical data marker...")
+        print("[1/7] Checking for historical data marker...")
         if not marker_exists(s3_bucket_name, "raw/historical/"):
             print("✗ Error: Marker file not found at s3://{}/raw/historical/_COMPLETE".format(s3_bucket_name))
             print("  The raw data has not been successfully uploaded.")
@@ -303,14 +452,14 @@ def main(env_name):
         print("✓ Marker found. Raw data is ready for processing.")
         
         # Check if processing has already been completed
-        print("\n[2/6] Checking if processing has already been completed...")
+        print("\n[2/7] Checking if processing has already been completed...")
         if marker_exists(s3_bucket_name, OUTPUT_PREFIX):
             print("✗ Error: Processing workflow has already been completed.")
             sys.exit(0)
         print("✓ No marker found. Ready to proceed with processing.")
         
         # Download from S3
-        print("\n[3/6] Downloading historical data from S3...")
+        print("\n[3/7] Downloading historical data from S3...")
         datasets = download_from_s3(s3_client, s3_bucket_name)
         
         if datasets is None:
@@ -318,19 +467,27 @@ def main(env_name):
             sys.exit(1)
         
         # Apply transformations
-        print("\n[4/6] Applying SARIMAX Prime transformations...")
+        print("\n[4/7] Applying SARIMAX Prime transformations...")
         processed_data, lambdas = apply_transformations(datasets)
         
         # Upload to S3
-        print("\n[5/6] Uploading processed data to S3...")
+        print("\n[5/7] Uploading processed data to S3...")
         upload_success = upload_to_s3(s3_client, s3_bucket_name, processed_data, lambdas)
         
         if not upload_success:
             print("Error: Failed to upload processed data to S3")
             sys.exit(1)
         
+        # Build and upload time series
+        print("\n[6/7] Building and uploading time series...")
+        ts_success = build_and_upload_time_series(s3_client, s3_bucket_name, processed_data)
+        
+        if not ts_success:
+            print("Error: Failed to build and upload time series")
+            sys.exit(1)
+        
         # Write marker and cleanup
-        print("\n[6/6] Finalizing...")
+        print("\n[7/7] Finalizing...")
         write_marker(s3_bucket_name, OUTPUT_PREFIX)
         cleanup_temp_files()
         
