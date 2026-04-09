@@ -39,6 +39,18 @@ class StorageStack(Stack):
             value=self.model_bucket.bucket_name,
             export_name=f"{env_name}-ModelBucketName"
         )
+
+        # DynamoDB table for current model pointer
+        self.model_table = dynamodb.Table(self, "Tsf2ModelTable",
+            table_name="Tsf2ModelPointer",
+            partition_key=dynamodb.Attribute(name="model_id", type=dynamodb.AttributeType.STRING),
+            removal_policy=removal,
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
+        )
+        CfnOutput(self, "ModelTableName",
+            value=self.model_table.table_name,
+            export_name=f"{env_name}-ModelTableName"
+        )
     
         # DynamoDB table for job metadata
         self.job_table = dynamodb.Table(self, "Tsf2JobTable",
@@ -48,11 +60,7 @@ class StorageStack(Stack):
             removal_policy=removal,
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
         )
-
-        # DynamoDB table for current model pointer
-        self.model_table = dynamodb.Table(self, "Tsf2ModelTable",
-            table_name="Tsf2ModelPointer",
-            partition_key=dynamodb.Attribute(name="model_id", type=dynamodb.AttributeType.STRING),
-            removal_policy=removal,
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
+        CfnOutput(self, "JobTableName",
+            value=self.job_table.table_name,
+            export_name=f"{env_name}-JobTableName"
         )
