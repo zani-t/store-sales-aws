@@ -263,6 +263,16 @@ def upload_to_s3(s3_client, bucket_name, processed_data, lambdas, hmvs):
         lambdas: Dictionary with lambda transform values
     """
     print(f"\n[S3] Uploading processed data to s3://{bucket_name}/{OUTPUT_PREFIX}")
+
+    def save_json_to_s3(data, s3_key):
+        buffer = BytesIO()
+        json_data = json.dumps(data, indent=2)
+        buffer.write(json_data.encode('utf-8'))
+        buffer.seek(0)
+        
+        print(f"  Uploading {s3_key}...", end=" ")
+        s3_client.upload_fileobj(buffer, bucket_name, s3_key)
+        print(f"✓")
     
     try:
         # Upload parquet file
@@ -276,38 +286,14 @@ def upload_to_s3(s3_client, bucket_name, processed_data, lambdas, hmvs):
         print(f"✓")
         
         # Upload lambda values as JSON
-        lambdas_buffer = BytesIO()
-        lambdas_json = json.dumps(lambdas, indent=2)
-        lambdas_buffer.write(lambdas_json.encode('utf-8'))
-        lambdas_buffer.seek(0)
-        
-        s3_key = f"{OUTPUT_PREFIX}lambdas.json"
-        print(f"  Uploading {s3_key}...", end=" ")
-        s3_client.upload_fileobj(lambdas_buffer, bucket_name, s3_key)
-        print(f"✓")
+        save_json_to_s3(lambdas, f"{OUTPUT_PREFIX}lambdas.json")
 
         # Upload HMV values as JSON
-        hmvs_buffer = BytesIO()
-        hmvs_json = json.dumps(hmvs, indent=2)
-        hmvs_buffer.write(hmvs_json.encode('utf-8'))
-        hmvs_buffer.seek(0)
-
-        s3_key = f"{OUTPUT_PREFIX}hmvs.json"
-        print(f"  Uploading {s3_key}...", end=" ")
-        s3_client.upload_fileobj(hmvs_buffer, bucket_name, s3_key)
-        print(f"✓")
+        save_json_to_s3(hmvs, f"{OUTPUT_PREFIX}hmvs.json")
 
         # Upload families filename mapping as JSON
         family_mapping = {family_encode(k): k for k in (NON_TWO_YEAR_FAMILIES.keys() | TWO_YEAR_FAMILIES)}
-        mapping_buffer = BytesIO()
-        mapping_json = json.dumps(family_mapping, indent=2)
-        mapping_buffer.write(mapping_json.encode('utf-8'))
-        mapping_buffer.seek(0)
-
-        s3_key = f"{OUTPUT_PREFIX}families_mapping.json"
-        print(f"  Uploading {s3_key}...", end=" ")
-        s3_client.upload_fileobj(mapping_buffer, bucket_name, s3_key)
-        print(f"✓")
+        save_json_to_s3(family_mapping, f"{OUTPUT_PREFIX}families_mapping.json")
         
         print(f"\n✓ Successfully uploaded processed data to S3")
         print(f"  Bucket: {bucket_name}")
