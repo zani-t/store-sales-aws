@@ -1,4 +1,5 @@
 data/
+simulator/store-sales-time-series-forecasting/
 .DS_Store
 
 *.swp
