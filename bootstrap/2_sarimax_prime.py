@@ -218,12 +218,14 @@ def apply_transformations(datasets):
     # Target encoding - HolidayMeanVariation
     print("  - Computing holiday mean variations...")
     ma = train[['date', 'sales']].groupby(['date']).agg({'sales': 'mean'})
-    ma = pd.DataFrame(ma.rolling(window=30, min_periods=15, center=True).mean().values, columns=['ma30']).set_index(ma.index)
+    ma = pd.DataFrame(ma.rolling(window=30, min_periods=15).mean().values, columns=['ma30']).set_index(ma.index)
     train = train.merge(ma, how='left', on='date')
     train['hmv'] = 0.0
+    hmvs = {}
     for holiday in holidays_events['description'].unique():
         df = train.loc[train['description'] == holiday, ['date', 'ma30', 'sales']].groupby(['date', 'ma30'], as_index=False).agg(sales=('sales', 'mean'))
         hmv = (df['sales'] - df['ma30']).mean()
+        hmvs[holiday] = float(hmv)
         train.loc[train['description'] == holiday, 'hmv'] = ((train['ntl_holiday'] == 1) |
                                                              (train['rgnl_holiday'] == 1) |
                                                              (train['lcl_holiday'] == 1)).astype('int8') * hmv
@@ -248,10 +250,10 @@ def apply_transformations(datasets):
     }
     
     print(f"\n✓ Transformations complete. Final dataset: {len(train)} rows")
-    return train, lambdas
+    return train, lambdas, hmvs
 
 
-def upload_to_s3(s3_client, bucket_name, processed_data, lambdas):
+def upload_to_s3(s3_client, bucket_name, processed_data, lambdas, hmvs):
     """Upload processed parquet file and lambda values to S3.
     
     Args:
@@ -282,6 +284,17 @@ def upload_to_s3(s3_client, bucket_name, processed_data, lambdas):
         s3_key = f"{OUTPUT_PREFIX}lambdas.json"
         print(f"  Uploading {s3_key}...", end=" ")
         s3_client.upload_fileobj(lambdas_buffer, bucket_name, s3_key)
+        print(f"✓")
+
+        # Upload HMV values as JSON
+        hmvs_buffer = BytesIO()
+        hmvs_json = json.dumps(hmvs, indent=2)
+        hmvs_buffer.write(hmvs_json.encode('utf-8'))
+        hmvs_buffer.seek(0)
+
+        s3_key = f"{OUTPUT_PREFIX}hmvs.json"
+        print(f"  Uploading {s3_key}...", end=" ")
+        s3_client.upload_fileobj(hmvs_buffer, bucket_name, s3_key)
         print(f"✓")
 
         # Upload families filename mapping as JSON
@@ -468,11 +481,11 @@ def main(env_name):
         
         # Apply transformations
         print("\n[4/7] Applying SARIMAX Prime transformations...")
-        processed_data, lambdas = apply_transformations(datasets)
+        processed_data, lambdas, hmvs = apply_transformations(datasets)
         
         # Upload to S3
         print("\n[5/7] Uploading processed data to S3...")
-        upload_success = upload_to_s3(s3_client, s3_bucket_name, processed_data, lambdas)
+        upload_success = upload_to_s3(s3_client, s3_bucket_name, processed_data, lambdas, hmvs)
         
         if not upload_success:
             print("Error: Failed to upload processed data to S3")
