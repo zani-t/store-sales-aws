@@ -218,7 +218,7 @@ def apply_transformations(datasets):
     # Target encoding - HolidayMeanVariation
     print("  - Computing holiday mean variations...")
     ma = train[['date', 'sales']].groupby(['date']).agg({'sales': 'mean'})
-    ma = pd.DataFrame(ma.rolling(window=30, min_periods=15).mean().values, columns=['ma30']).set_index(ma.index)
+    ma = pd.DataFrame(ma.rolling(window=15, min_periods=15).mean().values, columns=['ma30']).set_index(ma.index)
     train = train.merge(ma, how='left', on='date')
     train['hmv'] = 0.0
     hmvs = {}
