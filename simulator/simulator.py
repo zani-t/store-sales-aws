@@ -28,7 +28,7 @@ if parent_dir not in sys.path:
 from bootstrap import get_stack_output
 
 # Configuration
-CUTOFF_DATE = pd.Timestamp('2017-07-15')
+CUTOFF_DATE = pd.Timestamp('2017-07-16')
 DATA_DIR = './simulator/store-sales-time-series-forecasting/'
 ENV_NAME = os.environ.get('ENV_NAME', 'dev')
 
