@@ -151,7 +151,7 @@ def load_and_split_data():
         if dataset_name == 'stores':
             historical_datasets[dataset_name] = df
         else:
-            historical_datasets[dataset_name] = df[df['date'] < CUTOFF_DATE]
+            historical_datasets[dataset_name] = df[df['date'] <= CUTOFF_DATE]
 
         hist_count = len(historical_datasets[dataset_name])
         print(f"  {dataset_name}: {hist_count} historical")
