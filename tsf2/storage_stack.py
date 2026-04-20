@@ -15,7 +15,7 @@ class StorageStack(Stack):
         removal = RemovalPolicy.RETAIN if env_name == "prod" else RemovalPolicy.DESTROY
 
         # Data storage bucket
-        self.bucket = s3.Bucket(self, "Tsf2DataBucket",
+        self.data_bucket = s3.Bucket(self, "Tsf2DataBucket",
             versioned=True,
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
@@ -23,7 +23,7 @@ class StorageStack(Stack):
             auto_delete_objects=(env_name != "prod")
         )
         CfnOutput(self, "DataBucketName", 
-            value=self.bucket.bucket_name,
+            value=self.data_bucket.bucket_name,
             export_name=f"{env_name}-DataBucketName"
         )
 

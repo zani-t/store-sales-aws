@@ -9,7 +9,7 @@ from tsf2.storage_stack import StorageStack
 app = cdk.App()
 env_name = app.node.try_get_context("env") or "dev"
 
-StorageStack(
+storage_stack = StorageStack(
     app, f"{env_name}-StorageStack",
     env_name=env_name,
     env=cdk.Environment(
