@@ -14,14 +14,15 @@ from botocore.exceptions import ClientError
 MARKER = '_COMPLETE'
 
 # Configuration
-class IO(Enum):
-    INPUT = 1
-    OUTPUT = 2
-
 BIWEEKLY_INPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
 BIWEEKLY_OUTPUT_PREFIX = 'processed/sarimax-subprime/biweekly/'
 BIWEEKLY_DATASET_NAMES = ['holidays_events', 'oil', 'train', 'transactions']
 CUTOFF_DATE = datetime(2017, 7, 15)  # Storage starts at 2017/BW-14
+
+
+class IO(Enum):
+    INPUT = 1
+    OUTPUT = 2
 
 
 def get_full_biweekly_prefix(year, biweek_num, io_type):
