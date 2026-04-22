@@ -1,5 +1,6 @@
 import os
 import json
+from enum import Enum
 from io import BytesIO
 from datetime import datetime, timedelta
 from calendar import monthrange
@@ -13,13 +14,21 @@ from botocore.exceptions import ClientError
 MARKER = '_COMPLETE'
 
 # Configuration
+class IO(Enum):
+    INPUT = 1
+    OUTPUT = 2
+
+BIWEEKLY_INPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
+BIWEEKLY_OUTPUT_PREFIX = 'processed/sarimax-subprime/biweekly/'
 BIWEEKLY_DATASET_NAMES = ['holidays_events', 'oil', 'train', 'transactions']
-BIWEEKLY_OUTPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
 CUTOFF_DATE = datetime(2017, 7, 15)  # Storage starts at 2017/BW-14
 
 
-def get_full_output_prefix(year, biweek_num):
-    return f"{BIWEEKLY_OUTPUT_PREFIX}{year}/BW-{biweek_num}/"
+def get_full_biweekly_prefix(year, biweek_num, io_type):
+    if io_type == IO.INPUT:
+        return f"{BIWEEKLY_INPUT_PREFIX}{year}/BW-{biweek_num}/"
+    elif io_type == IO.OUTPUT:
+        return f"{BIWEEKLY_OUTPUT_PREFIX}{year}/BW-{biweek_num}/"
 
 
 def marker_exists(s3_client, bucket, prefix):
@@ -123,7 +132,7 @@ def load_lambda_hmv_jsons(s3_client, bucket_name, year, biweek_num):
         if biweek_num == 14:
             json_prefix = 'processed/sarimax-prime/historical/'
         else:
-            json_prefix = get_full_output_prefix(year, biweek_num - 1)
+            json_prefix = get_full_biweekly_prefix(year, biweek_num - 1, IO.INPUT)
         
         # Load lambda values
         try:
@@ -357,7 +366,7 @@ def upload_biweekly_data(s3_client, bucket_name, processed_data, year, biweek_nu
         bool: True if successful, False otherwise
     """
     try:
-        s3_prefix = get_full_output_prefix(year, biweek_num)
+        s3_prefix = get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT)
         
         print(f"\n[S3] Uploading processed data to s3://{bucket_name}/{s3_prefix}")
         
@@ -445,7 +454,7 @@ def lambda_handler(event, context):
         
         # Step 4: Check if processing has already been completed
         print("\n[4/10] Checking if processing has already been completed...")
-        if marker_exists(s3_client, bucket_name, get_full_output_prefix(year, biweek_num)):
+        if marker_exists(s3_client, bucket_name, get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT)):
             print("✗ Error: Processing workflow has already been completed.")
             return {
                 'statusCode': 400,
@@ -505,7 +514,7 @@ def lambda_handler(event, context):
         
         # Step 10: Write marker
         print("\n[10/10] Finalizing...")
-        write_marker(s3_client, bucket_name, get_full_output_prefix(year, biweek_num))
+        write_marker(s3_client, bucket_name, get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT))
         
         print("\n" + "=" * 70)
         print("✓ Processing completed successfully!")
