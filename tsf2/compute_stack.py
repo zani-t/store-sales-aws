@@ -26,14 +26,7 @@ class ComputeStack(Stack):
         removal = RemovalPolicy.RETAIN if env_name == "prod" else RemovalPolicy.DESTROY
 
         # ── Preproessing infrastructure ──
-        # Lambda image repository
-        preprocessing_repo = ecr.Repository(self, "PreprocessingRepo",
-            repository_name=f"{env_name}-tsf2-preprocessing",
-            removal_policy=removal,
-            empty_on_delete=(env_name != "prod")
-        )
-
-        # Preprocessing Lambda function log group
+        # Lambda function log group
         preprocessing_log_group = logs.LogGroup(self, "PreprocessingLogGroup",
             log_group_name=f"/aws/lambda/{env_name}-tsf2-preprocessing",
             retention=logs.RetentionDays.ONE_MONTH if env_name == "prod" else logs.RetentionDays.ONE_WEEK,
