@@ -122,44 +122,6 @@ def calculate_biweek_number(date_obj):
     return year, global_biweek, biweek_start, biweek_end
 
 
-def load_lambda_hmv_jsons(s3_client, bucket_name, year, biweek_num):
-    """Load lambda and HMV JSON files from S3.
-    
-    Returns:
-        tuple: (lambdas dict, hmvs dict) or (None, None) if error
-    """
-    try:
-        print(f"\n[S3] Loading lambda and HMV values...")
-        if biweek_num == 14:
-            json_prefix = 'processed/sarimax-prime/historical/'
-        else:
-            json_prefix = get_full_biweekly_prefix(year, biweek_num - 1, IO.INPUT)
-        
-        # Load lambda values
-        try:
-            response = s3_client.get_object(Bucket=bucket_name, Key=f"{json_prefix}lambdas.json")
-            lambdas = json.loads(response['Body'].read().decode('utf-8'))
-            print(f"  ✓ Loaded lambdas: {lambdas}")
-        except Exception as e:
-            print(f"  ✗ Could not load lambdas.json: {e}")
-            return None, None
-        
-        # Load HMV values
-        try:
-            response = s3_client.get_object(Bucket=bucket_name, Key=f"{json_prefix}hmvs.json")
-            hmvs = json.loads(response['Body'].read().decode('utf-8'))
-            print(f"  ✓ Loaded HMV values for {len(hmvs)} holidays")
-        except Exception as e:
-            print(f"  ✗ Could not load hmvs.json: {e}")
-            return None, None
-        
-        return lambdas, hmvs
-    
-    except Exception as e:
-        print(f"Error loading lambda/HMV JSONs: {e}")
-        return None, None
-
-
 def load_daily_csvs(s3_client, bucket_name, biweek_start, biweek_end):
     """Load and concatenate CSV files from all days in biweek period.
     
@@ -231,7 +193,7 @@ def load_stores_csv(s3_client, bucket_name):
         return None
 
 
-def apply_sarimax_prime_transforms(datasets, lambdas, hmvs):
+def apply_sarimax_prime_transforms(datasets):
     """Apply SARIMAX Prime transformations.
     
     Returns:
@@ -312,29 +274,6 @@ def apply_sarimax_prime_transforms(datasets, lambdas, hmvs):
     train['low_oil_price'] = train['low_oil_price'].bfill()
     train['high_oil_price'] = train['high_oil_price'].bfill()
     
-    # BoxCox transforms
-    print("  - Applying BoxCox transforms...")
-    train['onpromotion'] = boxcox(train['onpromotion'] + 0.01, lambdas['lmbda_onpromotion'])
-    train['transactions'] = boxcox(train['transactions'] + 0.01, lambdas['lmbda_transactions'])
-    train['sales'] = boxcox(train['sales'] + 0.01, lambdas['lmbda_sales'])
-
-    # Target encoding - HolidayMeanVariation
-    print("  - Computing holiday mean variations...")
-    ma = train[['date', 'sales']].groupby(['date']).agg({'sales': 'mean'})
-    ma = pd.DataFrame(ma.rolling(window=13, min_periods=13).mean().values, columns=['ma30']).set_index(ma.index)
-    train = train.merge(ma, how='left', on='date')
-    train['hmv'] = 0.0
-    for holiday in holidays_events['description'].unique():
-        if holiday not in hmvs:
-            df = train.loc[train['description'] == holiday, ['date', 'ma30', 'sales']].groupby(['date', 'ma30'], as_index=False).agg(sales=('sales', 'mean'))
-            hmv = (df['sales'] - df['ma30']).mean()
-            hmvs[holiday] = float(hmv)
-        else:
-            hmv = hmvs[holiday]
-        train.loc[train['description'] == holiday, 'hmv'] = ((train['ntl_holiday'] == 1) |
-                                                             (train['rgnl_holiday'] == 1) |
-                                                             (train['lcl_holiday'] == 1)).astype('int8') * hmv
-    
     # One-hot encoding
     print("  - One-hot encoding categorical features...")
     train.loc[(train['ntl_holiday'] == 0) & (train['rgnl_holiday'] == 0) & (train['lcl_holiday'] == 0), 'holiday_type'] = np.nan
@@ -347,7 +286,7 @@ def apply_sarimax_prime_transforms(datasets, lambdas, hmvs):
     train = train.reindex(columns=train.columns.union(cols_to_int), fill_value=0)
     train[cols_to_int] = train[cols_to_int].astype('int8')
     
-    train = train.drop(['locale', 'locale_name', 'description', 'transferred', 'ma30'], axis=1)
+    train = train.drop(['locale', 'locale_name', 'transferred'], axis=1)
     
     print(f"✓ Transformations complete. Final dataset: {len(train)} rows")
     return train
@@ -423,7 +362,7 @@ def lambda_handler(event, context):
             }
         
         # Step 1: Get latest daily folder
-        print("[1/10] Checking latest daily upload...")
+        print("[1/9] Checking latest daily upload...")
         latest_date, latest_prefix = get_latest_daily_folder(s3_client, bucket_name)
         
         if latest_date is None:
@@ -437,7 +376,7 @@ def lambda_handler(event, context):
         print(f"✓ Latest folder: {latest_date.date()}")
         
         # Step 2: Check if trigger date
-        print("\n[2/10] Checking if date is a trigger date...")
+        print("\n[2/9] Checking if date is a trigger date...")
         if not is_trigger_date(latest_date):
             msg = f"Date {latest_date.date()} is not a trigger date. Skipping processing."
             print(f"ℹ {msg}")
@@ -448,13 +387,13 @@ def lambda_handler(event, context):
         print(f"✓ {latest_date.date()} is a trigger date")
         
         # Step 3: Calculate biweek
-        print("\n[3/10] Calculating biweek parameters...")
+        print("\n[3/9] Calculating biweek parameters...")
         year, biweek_num, biweek_start, biweek_end = calculate_biweek_number(latest_date)
         print(f"✓ Year: {year}, Biweek: {biweek_num}")
         print(f"  Period: {biweek_start.date()} to {biweek_end.date()}")
         
         # Step 4: Check if processing has already been completed
-        print("\n[4/10] Checking if processing has already been completed...")
+        print("\n[4/9] Checking if processing has already been completed...")
         if marker_exists(s3_client, bucket_name, get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT)):
             print("✗ Error: Processing workflow has already been completed.")
             return {
@@ -463,19 +402,8 @@ def lambda_handler(event, context):
             }
         print("✓ No marker found. Ready to proceed with processing.")
         
-        # Step 5: Load previous lambda and HMV jsons
-        print("\n[5/10] Loading previous lambda and HMV values...")
-        lambdas, hmvs = load_lambda_hmv_jsons(s3_client, bucket_name, year, biweek_num)
-        if lambdas is None or hmvs is None:
-            error_msg = "Failed to load lambda or HMV values"
-            print(f"✗ {error_msg}")
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': error_msg})
-            }
-        
         # Step 6: Load and concatenate daily CSVs
-        print("\n[6/10] Loading daily CSVs from biweek period...")
+        print("\n[5/9] Loading daily CSVs from biweek period...")
         datasets = load_daily_csvs(s3_client, bucket_name, biweek_start, biweek_end)
         if datasets is None:
             error_msg = "Failed to load datasets from daily CSVs"
@@ -486,7 +414,7 @@ def lambda_handler(event, context):
             }
         
         # Step 7: Load stores CSV
-        print("\n[7/10] Loading stores.csv for feature engineering...")
+        print("\n[6/9] Loading stores.csv for feature engineering...")
         stores = load_stores_csv(s3_client, bucket_name)
         if stores is None:
             error_msg = "Failed to load stores.csv"
@@ -498,11 +426,11 @@ def lambda_handler(event, context):
         datasets['stores'] = stores
         
         # Step 8: Apply SARIMAX Prime transformations
-        print("\n[8/10] Processing data with SARIMAX Prime transformations...")
-        processed_data = apply_sarimax_prime_transforms(datasets, lambdas, hmvs)
+        print("\n[7/9] Processing data with SARIMAX Prime transformations...")
+        processed_data = apply_sarimax_prime_transforms(datasets)
         
         # Step 9: Upload to S3
-        print("\n[9/10] Uploading processed data to S3...")
+        print("\n[8/9] Uploading processed data to S3...")
         upload_success = upload_biweekly_data(s3_client, bucket_name, processed_data, year, biweek_num)
         
         if not upload_success:
@@ -514,7 +442,7 @@ def lambda_handler(event, context):
             }
         
         # Step 10: Write marker
-        print("\n[10/10] Finalizing...")
+        print("\n[9/9] Finalizing...")
         write_marker(s3_client, bucket_name, get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT))
         
         print("\n" + "=" * 70)
