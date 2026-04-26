@@ -7,10 +7,11 @@ Output model is stored in <model_bucket>/xgboost/historical/model.joblib.
 """
 import os
 import sys
+import uuid
+import datetime
+from datetime import datetime as dt
 from pathlib import Path
 from io import BytesIO
-import datetime
-import uuid
 
 import boto3
 import numpy as np
@@ -32,11 +33,6 @@ from bootstrap import get_stack_output, marker_exists, write_marker
 S3_INPUT_PREFIX = 'processed/xgboost-prime/historical/'
 S3_OUTPUT_PREFIX = 'xgboost/historical/'
 MODEL_FILENAME = 'model.joblib'
-
-# DynamoDB configuration
-MODEL_ID = "xgboost"
-JOB_TYPE = "xgboost-bootstrap"
-WEEK = "historical"
 
 
 def download_data_from_s3(s3_client, bucket_name):
@@ -97,9 +93,35 @@ def train_stacking_model(X, y):
     Returns:
         StackingRegressor: Trained model
     """
+
+    xgbsr_params = {
+        'estimators': {
+            'xgb1': {
+                'model': 'XGBRegressor',
+                'params': {
+                    'n_estimators': 100,
+                    'learning_rate': 0.1,
+                    'seed': 66
+                }
+            },
+            'xgb2': {
+                'model': 'XGBRegressor',
+                'params': {
+                    'n_estimators': 100,
+                    'learning_rate': 0.1,
+                    'seed': 77
+                }
+            }
+       },
+        'final_estimator': {
+            'model': 'LinearRegression'
+        }
+    }
+
     print(f"\n[TRAINING] Training stacked XGBoost model")
     
     try:
+        start_time = dt.now(datetime.UTC)
         print(f"  Input shape: X={X.shape}, y={y.shape if hasattr(y, 'shape') else len(y)}")
         
         # Define base estimators - two XGBoost models with different random seeds
@@ -118,12 +140,15 @@ def train_stacking_model(X, y):
         print(f"  Fitting stacking ensemble...")
         sr.fit(X, y.values.ravel() if isinstance(y, pd.DataFrame) else y)
         print(f"  ✓ Model training completed")
+        end_time = dt.now(datetime.UTC)
+        elapsed = (end_time - start_time).total_seconds()
+        print(f"  Training time: {elapsed:.2f} seconds")
         
-        return sr
+        return sr, xgbsr_params, start_time, end_time
         
     except Exception as e:
         print(f"  ✗ Error training model: {e}")
-        return None
+        return None, None, None, None
 
 
 def serialize_model(model):
@@ -192,32 +217,31 @@ def upload_model_to_s3(s3_client, model_bucket, model_bytes):
         return None
 
 
-def log_model_to_dynamodb(dynamodb_client, model_table_name, s3_path):
+def log_model_to_dynamodb(dynamodb_resource, model_table_name, s3_path, job_id):
     """Log model metadata to DynamoDB ModelTable.
     
     Args:
-        dynamodb_client: Boto3 DynamoDB client
+        dynamodb_resource: Boto3 DynamoDB resource
         model_table_name: DynamoDB table name
         s3_path: S3 path of uploaded model
-    
+        job_id: Unique identifier for the job
+
     Returns:
         bool: True if successful, False otherwise
     """
     print(f"\n[DYNAMODB] Logging model to {model_table_name}")
     
     try:
-        table = dynamodb_client.Table(model_table_name)
-        
+        table = dynamodb_resource.Table(model_table_name)
         item = {
-            'model_id': MODEL_ID,
-            'model_path': s3_path,
-            'timestamp': datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00', 'Z'),
+            'model_job_id': job_id,
+            'label': 'historical_xgbsr',
+            'path': s3_path,
         }
         
         print(f"  Writing model metadata...", end=" ", flush=True)
         table.put_item(Item=item)
         print(f"✓")
-        print(f"  Item: {item}")
         
         return True
         
@@ -227,13 +251,14 @@ def log_model_to_dynamodb(dynamodb_client, model_table_name, s3_path):
         return False
 
 
-def log_job_to_dynamodb(dynamodb_client, job_table_name, s3_path, started_at, finished_at):
+def log_job_to_dynamodb(dynamodb_resource, job_table_name, s3_path, job_id, params, start_time, end_time):
     """Log job metadata to DynamoDB JobTable.
     
     Args:
-        dynamodb_client: Boto3 DynamoDB client
+        dynamodb_resource: Boto3 DynamoDB resource
         job_table_name: DynamoDB table name
         s3_path: S3 path of uploaded model
+        job_id: Unique identifier for the job
         started_at: Job start timestamp (ISO format string)
         finished_at: Job end timestamp (ISO format string)
     
@@ -243,29 +268,20 @@ def log_job_to_dynamodb(dynamodb_client, job_table_name, s3_path, started_at, fi
     print(f"\n[DYNAMODB] Logging job to {job_table_name}")
     
     try:
-        table = dynamodb_client.Table(job_table_name)
-        
-        # Extract date from finished_at timestamp
-        from datetime import datetime as dt
-        finished_dt = dt.fromisoformat(finished_at.replace('Z', '+00:00'))
-        run_date = finished_dt.strftime('%Y-%m-%d')
-        
+        table = dynamodb_resource.Table(job_table_name)
         item = {
-            'job_id': str(uuid.uuid4()),
-            'job_type': JOB_TYPE,
-            'run_date': run_date,
-            'run_type': 'bootstrap',
-            'week': WEEK,
-            'status': 'completed',
-            'started_at': started_at,
-            'finished_at': finished_at,
-            'model_s3_path': s3_path
+            'job_type': 'bootstrap_xgbsr',
+            'complete_timestamp': str(end_time)[:-6],
+            'job_id': job_id,
+            'elapsed_seconds': str((end_time - start_time).total_seconds()),
+            'biweek': 'historical',
+            'model_s3_path': s3_path,
+            'parameters': str(params),
         }
         
         print(f"  Writing job metadata...", end=" ", flush=True)
         table.put_item(Item=item)
         print(f"✓")
-        print(f"  Item keys: {list(item.keys())}")
         
         return True
         
@@ -303,9 +319,6 @@ def main(env_name):
     print()
     
     try:
-        # Record start time
-        started_at = datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00', 'Z')
-        
         # Initialize boto3 clients
         s3_client = boto3.client('s3')
         dynamodb_resource = boto3.resource('dynamodb')
@@ -336,7 +349,7 @@ def main(env_name):
         
         # Train model
         print("\n[4/6] Training stacked XGBoost model...")
-        sr = train_stacking_model(X, y)
+        sr, xgbsr_params, start_time, end_time = train_stacking_model(X, y)
         
         if sr is None:
             print("✗ Failed to train model.")
@@ -359,20 +372,22 @@ def main(env_name):
             sys.exit(1)
         
         # Log model to DynamoDB
-        model_logged = log_model_to_dynamodb(dynamodb_resource, model_table_name, s3_path)
+        job_id = str(uuid.uuid4())
+        model_logged = log_model_to_dynamodb(dynamodb_resource, model_table_name, s3_path, job_id)
         
         if not model_logged:
             print("✗ Failed to log model to DynamoDB.")
             sys.exit(1)
         
         # Record end time and log job
-        finished_at = datetime.datetime.now(datetime.UTC).isoformat().replace('+00:00', 'Z')
         job_logged = log_job_to_dynamodb(
             dynamodb_resource,
             job_table_name,
             s3_path,
-            started_at,
-            finished_at
+            job_id,
+            xgbsr_params,
+            start_time,
+            end_time
         )
         
         if not job_logged:

@@ -42,8 +42,7 @@ class StorageStack(Stack):
 
         # DynamoDB table for current model pointer
         self.model_table = dynamodb.Table(self, "Tsf2ModelTable",
-            table_name="Tsf2ModelPointer",
-            partition_key=dynamodb.Attribute(name="model_id", type=dynamodb.AttributeType.STRING),
+            partition_key=dynamodb.Attribute(name="model_job_id", type=dynamodb.AttributeType.STRING),
             removal_policy=removal,
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
         )
@@ -54,9 +53,8 @@ class StorageStack(Stack):
     
         # DynamoDB table for job metadata
         self.job_table = dynamodb.Table(self, "Tsf2JobTable",
-            table_name=f"{env_name}-Tsf2JobMetadata",
-            partition_key=dynamodb.Attribute(name="job_id", type=dynamodb.AttributeType.STRING),
-            sort_key=dynamodb.Attribute(name="run_date", type=dynamodb.AttributeType.STRING),
+            partition_key=dynamodb.Attribute(name="job_type", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="complete_timestamp", type=dynamodb.AttributeType.STRING),
             removal_policy=removal,
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
         )

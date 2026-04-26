@@ -218,13 +218,13 @@ def apply_transformations(datasets):
     # Target encoding - HolidayMeanVariation
     print("  - Computing holiday mean variations...")
     ma = train[['date', 'sales']].groupby(['date']).agg({'sales': 'mean'})
-    ma = pd.DataFrame(ma.rolling(window=15, min_periods=15).mean().values, columns=['ma30']).set_index(ma.index)
+    ma = pd.DataFrame(ma.rolling(window=15, min_periods=1).mean().values, columns=['ma15']).set_index(ma.index)
     train = train.merge(ma, how='left', on='date')
     train['hmv'] = 0.0
     hmvs = {}
     for holiday in holidays_events['description'].unique():
-        df = train.loc[train['description'] == holiday, ['date', 'ma30', 'sales']].groupby(['date', 'ma30'], as_index=False).agg(sales=('sales', 'mean'))
-        hmv = (df['sales'] - df['ma30']).mean()
+        df = train.loc[train['description'] == holiday, ['date', 'ma15', 'sales']].groupby(['date', 'ma15'], as_index=False).agg(sales=('sales', 'mean'))
+        hmv = (df['sales'] - df['ma15']).mean()
         hmvs[holiday] = float(hmv)
         train.loc[train['description'] == holiday, 'hmv'] = ((train['ntl_holiday'] == 1) |
                                                              (train['rgnl_holiday'] == 1) |
@@ -240,7 +240,7 @@ def apply_transformations(datasets):
                    'store_type_B', 'store_type_C', 'store_type_D', 'store_type_E']
     train[cols_to_int] = train[cols_to_int].astype('int8')
     
-    train = train.drop(['locale', 'locale_name', 'description', 'transferred', 'ma30'], axis=1)
+    train = train.drop(['locale', 'locale_name', 'description', 'transferred', 'ma15'], axis=1)
     
     # Store lambda values for inverse transforms
     lambdas = {
