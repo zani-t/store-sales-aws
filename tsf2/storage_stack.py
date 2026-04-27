@@ -42,7 +42,7 @@ class StorageStack(Stack):
 
         # DynamoDB table for current model pointer
         self.model_table = dynamodb.Table(self, "Tsf2ModelTable",
-            partition_key=dynamodb.Attribute(name="model_job_id", type=dynamodb.AttributeType.STRING),
+            partition_key=dynamodb.Attribute(name="model", type=dynamodb.AttributeType.STRING),
             removal_policy=removal,
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST
         )

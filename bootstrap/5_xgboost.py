@@ -12,6 +12,7 @@ import datetime
 from datetime import datetime as dt
 from pathlib import Path
 from io import BytesIO
+from decimal import Decimal
 
 import boto3
 import numpy as np
@@ -100,7 +101,7 @@ def train_stacking_model(X, y):
                 'model': 'XGBRegressor',
                 'params': {
                     'n_estimators': 100,
-                    'learning_rate': 0.1,
+                    'learning_rate': Decimal('0.1'),
                     'seed': 66
                 }
             },
@@ -108,7 +109,7 @@ def train_stacking_model(X, y):
                 'model': 'XGBRegressor',
                 'params': {
                     'n_estimators': 100,
-                    'learning_rate': 0.1,
+                    'learning_rate': Decimal('0.1'),
                     'seed': 77
                 }
             }
@@ -234,8 +235,9 @@ def log_model_to_dynamodb(dynamodb_resource, model_table_name, s3_path, job_id):
     try:
         table = dynamodb_resource.Table(model_table_name)
         item = {
+            'model': 'xgbsr',
             'model_job_id': job_id,
-            'label': 'historical_xgbsr',
+            'biweek': 'historical',
             'path': s3_path,
         }
         
@@ -273,10 +275,10 @@ def log_job_to_dynamodb(dynamodb_resource, job_table_name, s3_path, job_id, para
             'job_type': 'bootstrap_xgbsr',
             'complete_timestamp': str(end_time)[:-6],
             'job_id': job_id,
-            'elapsed_seconds': str((end_time - start_time).total_seconds()),
+            'elapsed_seconds': Decimal(str(f'{(end_time - start_time).total_seconds():.2f}')),
             'biweek': 'historical',
             'model_s3_path': s3_path,
-            'parameters': str(params),
+            'parameters': params,
         }
         
         print(f"  Writing job metadata...", end=" ", flush=True)

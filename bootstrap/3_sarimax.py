@@ -275,7 +275,7 @@ def log_job_metadata(dynamodb_resource, job_table_name, params, start_time, end_
         'job_type': 'sarimax_training',
         'complete_timestamp': str(end_time)[:-6],
         'job_id': str(uuid.uuid4()),
-        'elapsed_seconds': str((end_time - start_time).total_seconds()),
+        'elapsed_seconds': Decimal(str(f'{(end_time - start_time).total_seconds():.2f}')),
         'biweek': 'historical',
         'parameters': params,
     }
