@@ -63,11 +63,13 @@ def download_data_from_s3(s3_client, bucket_name):
         if 'sales' in X_full.columns:
             y = X_full.pop('sales').to_frame()
             X = X_full
+            X_cols = X.columns.tolist()
             print(f"  Target variable (sales) extracted from data")
-            return X, y
+            return X, y, X_cols
         else:
-            print(f"  Warning: 'sales' column not found. Using all columns as features.")
-            return X_full, None
+            print(f"  Warning: 'sales' column not found.")
+            X_cols = X_full.columns.tolist()
+            return X_full, None, X_cols
         
     except ClientError as e:
         error_code = e.response['Error']['Code']
@@ -77,11 +79,11 @@ def download_data_from_s3(s3_client, bucket_name):
         else:
             print(f"✗")
             print(f"  Error: {e}")
-        return None, None
+        return None, None, None
     except Exception as e:
         print(f"✗")
         print(f"  Error: {e}")
-        return None, None
+        return None, None, None
 
 
 def train_stacking_model(X, y):
@@ -152,12 +154,13 @@ def train_stacking_model(X, y):
         return None, None, None, None
 
 
-def serialize_model(model):
+def serialize_model(model, X_cols):
     """Serialize trained model to bytes using joblib.
     
     Args:
         model: Trained sklearn model
-    
+        X_cols: List of feature column names
+
     Returns:
         BytesIO: Serialized model or None if error
     """
@@ -166,7 +169,10 @@ def serialize_model(model):
     try:
         print(f"  Serializing using joblib...", end=" ", flush=True)
         model_bytes = BytesIO()
-        joblib.dump(model, model_bytes)
+        joblib.dump({
+            'model': model,
+            'feature_names': X_cols
+        }, model_bytes)
         model_bytes.seek(0)
         print(f"✓")
         print(f"  Serialized size: {len(model_bytes.getvalue()) / 1024 / 1024:.2f} MB")
@@ -343,7 +349,7 @@ def main(env_name):
         
         # Download data
         print("\n[3/6] Downloading training data...")
-        X, y = download_data_from_s3(s3_client, data_bucket_name)
+        X, y, X_cols = download_data_from_s3(s3_client, data_bucket_name)
         
         if X is None or y is None:
             print("✗ Failed to download training data.")
@@ -359,7 +365,7 @@ def main(env_name):
         
         # Serialize model
         print("\n[5/6] Serializing model...")
-        model_bytes = serialize_model(sr)
+        model_bytes = serialize_model(sr, X_cols)
         
         if model_bytes is None:
             print("✗ Failed to serialize model.")
