@@ -3,6 +3,9 @@ from aws_cdk import (
     aws_iam as iam,
     aws_lambda as _lambda,
     aws_ecr as ecr,
+    aws_ecs as ecs,
+    aws_ecs_patterns as ecs_patterns,
+    aws_ec2 as ec2,
     aws_logs as logs,
     aws_s3 as s3,
     aws_s3_notifications as s3n,
@@ -73,3 +76,53 @@ class ComputeStack(Stack):
             actions=["s3:PutObject"],
             resources=[f"{data_bucket.bucket_arn}/processed/*"]
         ))
+
+
+        # ── General compute infrastructure ──
+        # VPC
+        vpc = ec2.Vpc(self, "VPC", max_azs=2)
+
+        # ECS Cluster
+        cluster = ecs.Cluster(self, "Cluster",
+            vpc=vpc,
+            enable_fargate_capacity_providers=True
+        )
+
+        # ── Evaluation infrastructure ──
+        # Container log group
+        evaluation_log_group = logs.LogGroup(self, "EvaluationLogGroup",
+            log_group_name=f"/aws/ecs/{env_name}-tsf2-evaluation",
+            retention=logs.RetentionDays.ONE_MONTH if env_name == "prod" else logs.RetentionDays.ONE_WEEK,
+            removal_policy=removal
+        )
+
+        # Fargate task definition
+        self.evaluation_task_def = ecs.FargateTaskDefinition(self, "EvaluationTaskDef",
+            memory_limit_mib=4096,
+            cpu=512,
+        )
+
+        # Container
+        self.evaluation_task_def.add_container("EvaluationContainer",
+            image=ecs.ContainerImage.from_asset("containers/evaluation"),
+            logging=ecs.LogDriver.aws_logs(
+                log_group=evaluation_log_group,
+                stream_prefix="evaluation"
+            ),
+            environment={
+                "ENV": env_name,
+                "DATA_BUCKET": data_bucket.bucket_name,
+                "MODEL_BUCKET": model_bucket.bucket_name,
+                "JOB_TABLE": job_table.table_name,
+                "MODEL_TABLE": model_table.table_name,
+            }
+        )
+
+        # ── Evaluation IAM grants ──
+        # Grant S3 permissions
+        data_bucket.grant_read(self.evaluation_task_def.task_role)
+        model_bucket.grant_read(self.evaluation_task_def.task_role)
+
+        # Grant DynamoDB permissions
+        job_table.grant_read_write_data(self.evaluation_task_def.task_role)
+        model_table.grant_read_write_data(self.evaluation_task_def.task_role)
