@@ -686,7 +686,7 @@ if __name__ == "__main__":
         
         # Get storage names from CloudFormation exports
         s3_client = boto3.client('s3')
-        dynamodb_resource = boto3.resource('dynamodb')
+        dynamodb_resource = boto3.resource('dynamodb', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
         try:
             print(f"Environment: {env_name}")
             data_bucket_name = os.environ.get('DATA_BUCKET')
