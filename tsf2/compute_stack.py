@@ -80,7 +80,15 @@ class ComputeStack(Stack):
 
         # ── General compute infrastructure ──
         # VPC
-        vpc = ec2.Vpc(self, "VPC", max_azs=2)
+        vpc = ec2.Vpc(self, "VPC", max_azs=2, cidr="10.0.0.0/16",
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    cidr_mask=24,
+                    name="public",
+                    subnet_type=ec2.SubnetType.PUBLIC
+                )
+            ]
+        )
 
         # ECS Cluster
         cluster = ecs.Cluster(self, "Cluster",
@@ -126,3 +134,4 @@ class ComputeStack(Stack):
         # Grant DynamoDB permissions
         job_table.grant_read_write_data(self.evaluation_task_def.task_role)
         model_table.grant_read_write_data(self.evaluation_task_def.task_role)
+        
