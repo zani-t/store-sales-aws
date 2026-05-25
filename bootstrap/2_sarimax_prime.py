@@ -31,6 +31,7 @@ from bootstrap import (
 
 # Dataset names to process
 DATASET_NAMES = ['holidays_events', 'oil', 'stores', 'train', 'transactions']
+SUBPRIME_OUTPUT_PREFIX = 'processed/sarimax-subprime/historical/'
 OUTPUT_PREFIX = 'processed/sarimax-prime/historical/'
 TIMESERIES_FAMILY_PREFIX = 'processed/sarimax-prime/historical/family/'
 TIMESERIES_STORE_PREFIX = 'processed/sarimax-prime/historical/store/'
@@ -121,13 +122,16 @@ def download_from_s3(s3_client, bucket_name):
     return datasets
 
 
-def apply_transformations(datasets):
-    """Apply SARIMAX Prime transformations to datasets.
+def apply_subprime_transformations(datasets):
+    """Apply SARIMAX Subprime transformations to datasets.
+    
+    Subprime includes all feature engineering and encoding, but NOT BoxCox transforms
+    or HMV computation (which requires data aggregation).
     
     Returns:
-        tuple: (processed_train_data, lambda_values_dict)
+        pd.DataFrame: Subprime-transformed dataset
     """
-    print(f"\n[TRANSFORM] Applying SARIMAX Prime transformations...")
+    print(f"\n[TRANSFORM] Applying SARIMAX Subprime transformations...")
     
     stores = datasets['stores']
     holidays_events = datasets['holidays_events']
@@ -167,8 +171,6 @@ def apply_transformations(datasets):
     train.fillna({'transactions': 0}, inplace=True)
     train.rename(columns={'type_x': 'store_type', 'type_y': 'holiday_type'}, inplace=True)
     
-    lmbda_sales = boxcox(train.loc[train['sales'] > 0, 'sales'])[1]
-    
     # FEATURE ENGINEERING
     print("  - Engineering features...")
     
@@ -207,10 +209,44 @@ def apply_transformations(datasets):
     train['low_oil_price'] = train['low_oil_price'].bfill()
     train['high_oil_price'] = train['high_oil_price'].bfill()
     
+    # One-hot encoding
+    print("  - One-hot encoding categorical features...")
+    train.loc[(train['ntl_holiday'] == 0) & (train['rgnl_holiday'] == 0) & (train['lcl_holiday'] == 0), 'holiday_type'] = np.nan
+    train = pd.get_dummies(train, columns=['holiday_type', 'store_type'])
+    
+    cols_to_int = ['holiday_type_Additional', 'holiday_type_Bridge', 'holiday_type_Event', 'holiday_type_Holiday',
+                   'holiday_type_Transfer', 'holiday_type_TransferredHoliday', 'holiday_type_Work Day', 'store_type_A',
+                   'store_type_B', 'store_type_C', 'store_type_D', 'store_type_E']
+    train[cols_to_int] = train[cols_to_int].astype('int8')
+    
+    train = train.drop(['locale', 'locale_name', 'transferred'], axis=1)
+    
+    print(f"✓ Subprime transformations complete. Dataset: {len(train)} rows")
+    return train
+
+
+def apply_prime_transformations(subprime_data, holidays_events):
+    """Apply final SARIMAX Prime transformations to subprime data.
+    
+    Applies BoxCox transforms and computes HMV (Holiday Mean Variation).
+    
+    Args:
+        subprime_data: DataFrame with subprime transformations applied
+        holidays_events: Original holidays_events DataFrame for holiday descriptions
+    
+    Returns:
+        tuple: (prime_data, lambdas_dict, hmvs_dict)
+    """
+    print(f"\n[TRANSFORM] Applying SARIMAX Prime transformations...")
+    
+    train = subprime_data.copy()
+    
     # BoxCox transforms
-    print("  - Applying BoxCox transforms...")
+    print("  - Computing lambda values and applying BoxCox transforms...")
+    lmbda_sales = boxcox(train.loc[train['sales'] > 0, 'sales'])[1]
     lmbda_onpromotion = boxcox(train.loc[train['onpromotion'] > 0, 'onpromotion'])[1]
-    lmbda_transactions = boxcox(transactions.loc[transactions['transactions'] > 0, 'transactions'])[1]
+    lmbda_transactions = boxcox(train.loc[train['transactions'] > 0, 'transactions'])[1]
+    
     train['onpromotion'] = boxcox(train['onpromotion'] + 0.01, lmbda_onpromotion)
     train['transactions'] = boxcox(train['transactions'] + 0.01, lmbda_transactions)
     train['sales'] = boxcox(train['sales'] + 0.01, lmbda_sales)
@@ -230,17 +266,7 @@ def apply_transformations(datasets):
                                                              (train['rgnl_holiday'] == 1) |
                                                              (train['lcl_holiday'] == 1)).astype('int8') * hmv
     
-    # One-hot encoding
-    print("  - One-hot encoding categorical features...")
-    train.loc[(train['ntl_holiday'] == 0) & (train['rgnl_holiday'] == 0) & (train['lcl_holiday'] == 0), 'holiday_type'] = np.nan
-    train = pd.get_dummies(train, columns=['holiday_type', 'store_type'])
-    
-    cols_to_int = ['holiday_type_Additional', 'holiday_type_Bridge', 'holiday_type_Event', 'holiday_type_Holiday',
-                   'holiday_type_Transfer', 'holiday_type_TransferredHoliday', 'holiday_type_Work Day', 'store_type_A',
-                   'store_type_B', 'store_type_C', 'store_type_D', 'store_type_E']
-    train[cols_to_int] = train[cols_to_int].astype('int8')
-    
-    train = train.drop(['locale', 'locale_name', 'description', 'transferred', 'ma15'], axis=1)
+    train = train.drop(['description', 'ma15'], axis=1)
     
     # Store lambda values for inverse transforms
     lambdas = {
@@ -249,8 +275,48 @@ def apply_transformations(datasets):
         'lmbda_transactions': float(lmbda_transactions)
     }
     
-    print(f"\n✓ Transformations complete. Final dataset: {len(train)} rows")
+    print(f"✓ Prime transformations complete. Final dataset: {len(train)} rows")
     return train, lambdas, hmvs
+
+
+def upload_subprime_to_s3(s3_client, bucket_name, subprime_data):
+    """Upload subprime parquet file to S3.
+    
+    Args:
+        s3_client: Boto3 S3 client
+        bucket_name: S3 bucket name
+        subprime_data: Subprime DataFrame
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    print(f"\n[S3] Uploading subprime data to s3://{bucket_name}/{SUBPRIME_OUTPUT_PREFIX}")
+    
+    try:
+        # Upload parquet file
+        parquet_buffer = BytesIO()
+        subprime_data.to_parquet(parquet_buffer, index=False)
+        parquet_buffer.seek(0)
+        
+        s3_key = f"{SUBPRIME_OUTPUT_PREFIX}data.parquet"
+        print(f"  Uploading {s3_key}...", end=" ")
+        s3_client.upload_fileobj(parquet_buffer, bucket_name, s3_key)
+        print(f"✓")
+        
+        print(f"\n✓ Successfully uploaded subprime data to S3")
+        print(f"  Bucket: {bucket_name}")
+        print(f"  Path: s3://{bucket_name}/{SUBPRIME_OUTPUT_PREFIX}")
+        
+        return True
+        
+    except ClientError as e:
+        print(f"✗")
+        print(f"  Error uploading to S3: {e}")
+        return False
+    except Exception as e:
+        print(f"✗")
+        print(f"  Error: {e}")
+        return False
 
 
 def upload_to_s3(s3_client, bucket_name, processed_data, lambdas, hmvs):
@@ -442,7 +508,7 @@ def main(env_name):
         s3_client = boto3.client('s3')
         
         # Check for marker file indicating raw data is ready
-        print("[1/7] Checking for historical data marker...")
+        print("[1/9] Checking for historical data marker...")
         if not marker_exists(s3_bucket_name, "raw/historical/"):
             print("✗ Error: Marker file not found at s3://{}/raw/historical/_COMPLETE".format(s3_bucket_name))
             print("  The raw data has not been successfully uploaded.")
@@ -451,26 +517,38 @@ def main(env_name):
         print("✓ Marker found. Raw data is ready for processing.")
         
         # Check if processing has already been completed
-        print("\n[2/7] Checking if processing has already been completed...")
+        print("\n[2/9] Checking if processing has already been completed...")
         if marker_exists(s3_bucket_name, OUTPUT_PREFIX):
             print("✗ Error: Processing workflow has already been completed.")
             sys.exit(0)
         print("✓ No marker found. Ready to proceed with processing.")
         
         # Download from S3
-        print("\n[3/7] Downloading historical data from S3...")
+        print("\n[3/9] Downloading historical data from S3...")
         datasets = download_from_s3(s3_client, s3_bucket_name)
         
         if datasets is None:
             print("Error: Failed to download datasets from S3")
             sys.exit(1)
         
-        # Apply transformations
-        print("\n[4/7] Applying SARIMAX Prime transformations...")
-        processed_data, lambdas, hmvs = apply_transformations(datasets)
+        # Apply subprime transformations
+        print("\n[4/9] Applying SARIMAX Subprime transformations...")
+        subprime_data = apply_subprime_transformations(datasets)
         
-        # Upload to S3
-        print("\n[5/7] Uploading processed data to S3...")
+        # Upload subprime to S3
+        print("\n[5/9] Uploading subprime data to S3...")
+        upload_subprime_success = upload_subprime_to_s3(s3_client, s3_bucket_name, subprime_data)
+        
+        if not upload_subprime_success:
+            print("Error: Failed to upload subprime data to S3")
+            sys.exit(1)
+        
+        # Apply prime transformations
+        print("\n[6/9] Applying SARIMAX Prime transformations...")
+        processed_data, lambdas, hmvs = apply_prime_transformations(subprime_data, datasets['holidays_events'])
+        
+        # Upload prime to S3
+        print("\n[7/9] Uploading prime data to S3...")
         upload_success = upload_to_s3(s3_client, s3_bucket_name, processed_data, lambdas, hmvs)
         
         if not upload_success:
@@ -478,7 +556,7 @@ def main(env_name):
             sys.exit(1)
         
         # Build and upload time series
-        print("\n[6/7] Building and uploading time series...")
+        print("\n[8/9] Building and uploading time series...")
         ts_success = build_and_upload_time_series(s3_client, s3_bucket_name, processed_data)
         
         if not ts_success:
@@ -486,7 +564,7 @@ def main(env_name):
             sys.exit(1)
         
         # Write marker and cleanup
-        print("\n[7/7] Finalizing...")
+        print("\n[9/9] Finalizing...")
         write_marker(s3_bucket_name, OUTPUT_PREFIX)
         cleanup_temp_files()
         
