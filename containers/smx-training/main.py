@@ -505,8 +505,7 @@ def log_job_metadata(dynamodb_resource, job_table_name, params, start_time, end_
         'complete_timestamp': str(end_time)[:-6],
         'job_id': str(uuid.uuid4()),
         'elapsed_seconds': Decimal(str(f'{(end_time - start_time).total_seconds():.2f}')),
-        'biweek': f'BW-{biweek_num}',
-        'year': year,
+        'biweek': f'{year}-BW-{biweek_num}',
         'parameters': params,
     }
     

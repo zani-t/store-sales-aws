@@ -681,7 +681,7 @@ if __name__ == "__main__":
     
     try:
         print("=" * 70)
-        print("Biweekly SARIMAX Prime Data Processing Lambda")
+        print("Biweekly Model Evaluation Process")
         print("=" * 70)
         
         # Get storage names from CloudFormation exports

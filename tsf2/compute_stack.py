@@ -137,23 +137,23 @@ class ComputeStack(Stack):
 
         # ── SARIMAX retraining infrastructure ──
         # Container log group
-        retraining_log_group = logs.LogGroup(self, "SmxRetrainingLogGroup",
+        smx_retraining_log_group = logs.LogGroup(self, "SmxRetrainingLogGroup",
             log_group_name=f"/aws/ecs/{env_name}-tsf2-smx-retraining",
             retention=logs.RetentionDays.ONE_MONTH if env_name == "prod" else logs.RetentionDays.ONE_WEEK,
             removal_policy=removal
         )
 
         # Fargate task definition
-        self.retraining_task_def = ecs.FargateTaskDefinition(self, "SmxRetrainingTaskDef",
+        self.smx_retraining_task_def = ecs.FargateTaskDefinition(self, "SmxRetrainingTaskDef",
             memory_limit_mib=4096,
             cpu=512,
         )
 
         # Container
-        self.retraining_task_def.add_container("SmxRetrainingContainer",
+        self.smx_retraining_task_def.add_container("SmxRetrainingContainer",
             image=ecs.ContainerImage.from_asset("containers/smx-training"),
             logging=ecs.LogDriver.aws_logs(
-                log_group=retraining_log_group,
+                log_group=smx_retraining_log_group,
                 stream_prefix="retraining"
             ),
             environment={
@@ -167,10 +167,10 @@ class ComputeStack(Stack):
 
         # ── Retraining IAM grants ──
         # Grant S3 permissions
-        data_bucket.grant_read_write(self.retraining_task_def.task_role)
-        model_bucket.grant_read_write(self.retraining_task_def.task_role)
+        data_bucket.grant_read_write(self.smx_retraining_task_def.task_role)
+        model_bucket.grant_read_write(self.smx_retraining_task_def.task_role)
 
         # Grant DynamoDB permissions
-        job_table.grant_read_write_data(self.retraining_task_def.task_role)
-        model_table.grant_read_write_data(self.retraining_task_def.task_role)
+        job_table.grant_read_write_data(self.smx_retraining_task_def.task_role)
+        model_table.grant_read_write_data(self.smx_retraining_task_def.task_role)
         
