@@ -1,6 +1,9 @@
 data/
 simulator/store-sales-time-series-forecasting/
 .DS_Store
+*.js.map
+node_modules/
+cdk.context.json
 
 *.swp
 package-lock.json
