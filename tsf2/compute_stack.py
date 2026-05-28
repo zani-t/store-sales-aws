@@ -173,4 +173,43 @@ class ComputeStack(Stack):
         # Grant DynamoDB permissions
         job_table.grant_read_write_data(self.smx_retraining_task_def.task_role)
         model_table.grant_read_write_data(self.smx_retraining_task_def.task_role)
+
+        # ── XGBSR retraining infrastructure ──
+        # Container log group
+        xgbsr_retraining_log_group = logs.LogGroup(self, "XGBSRRetrainingLogGroup",
+            log_group_name=f"/aws/ecs/{env_name}-tsf2-xgbsr-retraining",
+            retention=logs.RetentionDays.ONE_MONTH if env_name == "prod" else logs.RetentionDays.ONE_WEEK,
+            removal_policy=removal
+        )
+
+        # Fargate task definition
+        self.xgbsr_retraining_task_def = ecs.FargateTaskDefinition(self, "XGBSRRetrainingTaskDef",
+            memory_limit_mib=8192,
+            cpu=1024,
+        )
+
+        # Container
+        self.xgbsr_retraining_task_def.add_container("XGBSRRetrainingContainer",
+            image=ecs.ContainerImage.from_asset("containers/xgb-training"),
+            logging=ecs.LogDriver.aws_logs(
+                log_group=xgbsr_retraining_log_group,
+                stream_prefix="retraining"
+            ),
+            environment={
+                "ENV": env_name,
+                "DATA_BUCKET": data_bucket.bucket_name,
+                "MODEL_BUCKET": model_bucket.bucket_name,
+                "JOB_TABLE": job_table.table_name,
+                "MODEL_TABLE": model_table.table_name,
+            }
+        )
+
+        # ── Retraining IAM grants ──
+        # Grant S3 permissions
+        data_bucket.grant_read_write(self.xgbsr_retraining_task_def.task_role)
+        model_bucket.grant_read_write(self.xgbsr_retraining_task_def.task_role)
+
+        # Grant DynamoDB permissions
+        job_table.grant_read_write_data(self.xgbsr_retraining_task_def.task_role)
+        model_table.grant_read_write_data(self.xgbsr_retraining_task_def.task_role)
         
