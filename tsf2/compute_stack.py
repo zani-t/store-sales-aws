@@ -41,7 +41,7 @@ class ComputeStack(Stack):
         )
 
         # ECS Cluster
-        cluster = ecs.Cluster(self, "Cluster",
+        self.cluster = ecs.Cluster(self, "Cluster",
             vpc=vpc,
             enable_fargate_capacity_providers=True
         )
@@ -61,7 +61,7 @@ class ComputeStack(Stack):
         )
 
         # Container
-        self.evaluation_task_def.add_container("EvaluationContainer",
+        self.evaluation_container = self.evaluation_task_def.add_container("EvaluationContainer",
             image=ecs.ContainerImage.from_asset("containers/evaluation"),
             logging=ecs.LogDriver.aws_logs(
                 log_group=evaluation_log_group,
@@ -100,7 +100,7 @@ class ComputeStack(Stack):
         )
 
         # Container
-        self.smx_retraining_task_def.add_container("SmxRetrainingContainer",
+        self.smx_container = self.smx_retraining_task_def.add_container("SmxRetrainingContainer",
             image=ecs.ContainerImage.from_asset("containers/smx-training"),
             logging=ecs.LogDriver.aws_logs(
                 log_group=smx_retraining_log_group,
@@ -139,7 +139,7 @@ class ComputeStack(Stack):
         )
 
         # Container
-        self.xgbsr_retraining_task_def.add_container("XGBSRRetrainingContainer",
+        self.xgbsr_container = self.xgbsr_retraining_task_def.add_container("XGBSRRetrainingContainer",
             image=ecs.ContainerImage.from_asset("containers/xgb-training"),
             logging=ecs.LogDriver.aws_logs(
                 log_group=xgbsr_retraining_log_group,
