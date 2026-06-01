@@ -28,56 +28,6 @@ class ComputeStack(Stack):
 
         removal = RemovalPolicy.RETAIN if env_name == "prod" else RemovalPolicy.DESTROY
 
-        # ── Preproessing infrastructure ──
-        # Lambda function log group
-        preprocessing_log_group = logs.LogGroup(self, "PreprocessingLogGroup",
-            log_group_name=f"/aws/lambda/{env_name}-tsf2-preprocessing",
-            retention=logs.RetentionDays.ONE_MONTH if env_name == "prod" else logs.RetentionDays.ONE_WEEK,
-            removal_policy=removal
-        )
-
-        # Lambda function
-        self.preprocessing_lambda = _lambda.DockerImageFunction(self, "PreprocessingLambda",
-            function_name=f"{env_name}-tsf2-preprocessing",
-            code=_lambda.DockerImageCode.from_image_asset("containers/preprocessing"),
-            memory_size=3008,
-            timeout=Duration.minutes(15),
-            environment={
-                "ENV": env_name,
-                "DATA_BUCKET": data_bucket.bucket_name,
-            },
-            log_group=preprocessing_log_group,
-        )
-
-        # ── Preproessing IAM grants ──
-        # List bucket files on raw prefix
-        self.preprocessing_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:ListBucket"],
-            resources=[data_bucket.bucket_arn],
-            conditions={
-                "StringLike": {
-                    "s3:prefix": [
-                        "raw/*",
-                        "processed/*",
-                    ]
-                }
-            }
-        ))
-        # Read raw data and marker files (HeadObject) on both prefixes
-        self.preprocessing_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:GetObject"],
-            resources=[
-                f"{data_bucket.bucket_arn}/raw/*",
-                f"{data_bucket.bucket_arn}/processed/*"
-            ]
-        ))
-        # Write to processed prefix only
-        self.preprocessing_lambda.add_to_role_policy(iam.PolicyStatement(
-            actions=["s3:PutObject"],
-            resources=[f"{data_bucket.bucket_arn}/processed/*"]
-        ))
-
-
         # ── General compute infrastructure ──
         # VPC
         vpc = ec2.Vpc(self, "VPC", max_azs=2, cidr="10.0.0.0/16",

@@ -5,6 +5,7 @@ import aws_cdk as cdk
 
 from tsf2.storage_stack import StorageStack
 from tsf2.compute_stack import ComputeStack
+from tsf2.preprocessing_stack import PreprocessingStack
 
 
 app = cdk.App()
@@ -32,5 +33,16 @@ compute_stack = ComputeStack(
         )
     )
 compute_stack.add_dependency(storage_stack)
+
+preprocessing_stack = PreprocessingStack(
+    app, f"{env_name}-PreprocessingStack",
+    env_name=env_name,
+    data_bucket=storage_stack.data_bucket,
+    env=cdk.Environment(
+        account=os.getenv('CDK_DEFAULT_ACCOUNT'),
+        region=os.getenv('CDK_DEFAULT_REGION')
+        )
+    )
+preprocessing_stack.add_dependency(storage_stack)
 
 app.synth()
