@@ -23,7 +23,7 @@ from bootstrap import get_stack_output, write_marker
 
 # Configuration
 KAGGLE_COMPETITION = 'store-sales-time-series-forecasting'
-CUTOFF_DATE = pd.Timestamp('2017-07-15')
+CUTOFF_DATE = pd.Timestamp('2017-06-30')
 DATASET_NAMES = ['holidays_events', 'oil', 'stores', 'train', 'transactions']
 
 # Create temporary directory for all local operations
