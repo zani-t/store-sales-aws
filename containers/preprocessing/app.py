@@ -448,20 +448,6 @@ def lambda_handler(event, context):
         print("\n" + "=" * 70)
         print("✓ Processing completed successfully!")
         print("=" * 70)
-
-        # Directly trigger step function execution
-        sfn_client = boto3.client('stepfunctions')
-        state_machine_arn = os.environ.get('STATE_MACHINE_ARN')
-        if state_machine_arn:
-            try:
-                sfn_client.start_execution(
-                    stateMachineArn=state_machine_arn
-                )
-                print(f"✓ Triggered Step Function execution: {state_machine_arn}")
-            except Exception as e:
-                print(f"✗ Failed to trigger Step Function: {e}")
-        else:
-            print("⚠ STATE_MACHINE_ARN environment variable not set. Skipping Step Function trigger.")
         
         return {
             'statusCode': 200,

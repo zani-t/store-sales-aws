@@ -20,7 +20,8 @@ class StorageStack(Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             removal_policy=removal,
-            auto_delete_objects=(env_name != "prod")
+            auto_delete_objects=(env_name != "prod"),
+            event_bridge_enabled=True
         )
         CfnOutput(self, "DataBucketName", 
             value=self.data_bucket.bucket_name,
