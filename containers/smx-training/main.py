@@ -120,16 +120,20 @@ def ensure_directories_exist():
         print(f"  ✓ {directory}")
 
 
-def load_subprime_data(s3_client, bucket_name):
-    """Load all biweekly and historical subprime data from S3 and concatenate into one dataset.
+def load_subprime_data(s3_client, bucket_name, target_year, target_biweek):
+    """Load historical and biweekly subprime data from S3 up to target biweek.
+    
+    Args:
+        s3_client: Boto3 S3 client
+        bucket_name: S3 bucket name
+        target_year: Target year for data loading
+        target_biweek: Target biweek number for data loading
     
     Returns:
-        tuple: (combined_data DataFrame, latest_year, latest_biweek)
+        tuple: (combined_data DataFrame, target_year, target_biweek)
     """
     try:
         all_data = []
-        latest_year = None
-        latest_biweek = None
         
         # Step 1: Load historical data
         print(f"\n[S3] Loading historical subprime data...")
@@ -144,8 +148,8 @@ def load_subprime_data(s3_client, bucket_name):
         except ClientError as e:
             print(f"  ⚠ Could not load historical data: {e}")
         
-        # Step 2: Discover all biweekly folders
-        print(f"\n[S3] Discovering all biweekly folders...")
+        # Step 2: Discover biweekly folders up to target biweek
+        print(f"\n[S3] Discovering biweekly folders (target: {target_year}/BW-{target_biweek})...")
         paginator = s3_client.get_paginator('list_objects_v2')
         
         # Get all year folders
@@ -160,11 +164,15 @@ def load_subprime_data(s3_client, bucket_name):
         else:
             print(f"  Found {len(year_folders)} year folder(s)")
         
-        # Step 3: Load all biweekly data
+        # Step 3: Load biweekly data up to target biweek
         biweek_count = 0
         for year_folder in year_folders:
             # Extract year from path
             year = int(year_folder.rstrip('/').split('/')[-1])
+            
+            # Skip years after target year
+            if year > target_year:
+                continue
             
             # Get all biweek folders for this year
             pages = paginator.paginate(Bucket=bucket_name, Prefix=year_folder, Delimiter='/')
@@ -177,6 +185,10 @@ def load_subprime_data(s3_client, bucket_name):
                         try:
                             biweek_num = int(biweek_str.replace('BW-', ''))
                             
+                            # Skip biweeks after target if in target year
+                            if year == target_year and biweek_num > target_biweek:
+                                continue
+                            
                             # Load this biweek's data
                             response = s3_client.get_object(
                                 Bucket=bucket_name,
@@ -185,12 +197,6 @@ def load_subprime_data(s3_client, bucket_name):
                             bw_data = pd.read_parquet(BytesIO(response['Body'].read()))
                             all_data.append(bw_data)
                             biweek_count += 1
-                            
-                            # Track latest biweek
-                            if (latest_biweek is None) or (latest_year is None) or \
-                                (year > latest_year) or (year == latest_year and biweek_num > latest_biweek):
-                                latest_year = year
-                                latest_biweek = biweek_num
                             
                             print(f"  ✓ Loaded {year}/BW-{biweek_num}: {len(bw_data)} rows")
                         except Exception as e:
@@ -204,10 +210,7 @@ def load_subprime_data(s3_client, bucket_name):
         combined_data = pd.concat(all_data, ignore_index=True)
         print(f"  ✓ Combined dataset: {len(combined_data)} rows, {len(combined_data.columns)} columns")
         
-        if latest_year is None or latest_biweek is None:
-            raise Exception("Could not determine latest biweek from loaded data")
-        
-        return combined_data, latest_year, latest_biweek
+        return combined_data
         
     except Exception as e:
         raise Exception(f"Failed to load subprime data: {e}")
@@ -544,7 +547,9 @@ if __name__ == '__main__':
     data_bucket_name = os.environ.get('DATA_BUCKET')
     model_bucket_name = os.environ.get('MODEL_BUCKET')
     job_table_name = os.environ.get('JOB_TABLE')
-    
+    year_str = os.environ.get('YEAR')
+    biweek_num_str = os.environ.get('BIWEEK_NUM')
+
     if not data_bucket_name:
         print("Error: DATA_BUCKET environment variable not set")
         sys.exit(1)
@@ -553,6 +558,20 @@ if __name__ == '__main__':
         sys.exit(1)
     if not job_table_name:
         print("Error: JOB_TABLE environment variable not set")
+        sys.exit(1)
+    if not year_str:
+        print("Error: YEAR environment variable not set")
+        sys.exit(1)
+    if not biweek_num_str:
+        print("Error: BIWEEK_NUM environment variable not set")
+        sys.exit(1)
+    
+    # Convert to integers
+    try:
+        year = int(year_str)
+        biweek_num = int(biweek_num_str)
+    except ValueError:
+        print(f"Error: YEAR and BIWEEK_NUM must be integers. Got YEAR={year_str}, BIWEEK_NUM={biweek_num_str}")
         sys.exit(1)
     
     print("=" * 70)
@@ -572,15 +591,10 @@ if __name__ == '__main__':
         s3_client = boto3.client('s3')
         dynamodb_resource = boto3.resource('dynamodb', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
         
-        # Step 1: Load all biweekly and historical subprime data
-        print("[1/8] Loading all biweekly and historical subprime data...")
-        subprime_data, year, biweek_num = load_subprime_data(s3_client, data_bucket_name)
-        
-        if year is None or biweek_num is None:
-            print("✗ Error: Could not determine latest biweek from loaded data")
-            sys.exit(1)
-        
-        print(f"✓ Latest biweek: {year}/BW-{biweek_num}")
+        # Step 1: Load biweekly and historical subprime data up to target biweek
+        print("[1/8] Loading biweekly and historical subprime data...")
+        subprime_data = load_subprime_data(s3_client, data_bucket_name, year, biweek_num)
+        print(f"✓ Loaded data up to biweek: {year}/BW-{biweek_num}")
         
         # Step 2: Check if model training has already been completed
         print("\n[2/8] Checking if model training has already been completed...")

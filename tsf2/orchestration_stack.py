@@ -46,6 +46,19 @@ class OrchestrationStack(Stack):
         )
 
         # ── Task definitions ──
+        task_env_vars = [
+            tasks.TaskEnvironmentVariable(name="ENV", value=env_name),
+            tasks.TaskEnvironmentVariable(name="DATA_BUCKET", value=data_bucket.bucket_name),
+            tasks.TaskEnvironmentVariable(name="MODEL_BUCKET", value=model_bucket.bucket_name),
+            tasks.TaskEnvironmentVariable(name="JOB_TABLE", value=job_table.table_name),
+            tasks.TaskEnvironmentVariable(name="MODEL_TABLE", value=model_table.table_name),
+            tasks.TaskEnvironmentVariable(name="DATE", value=sfn.JsonPath.string_at('$.date')),
+            tasks.TaskEnvironmentVariable(name="YEAR", value=str(sfn.JsonPath.number_at('$.year'))),
+            tasks.TaskEnvironmentVariable(name="BIWEEK_NUM", value=str(sfn.JsonPath.number_at('$.biweek_num'))),
+            tasks.TaskEnvironmentVariable(name="BIWEEK_START", value=sfn.JsonPath.string_at('$.biweek_start')),
+            tasks.TaskEnvironmentVariable(name="BIWEEK_END", value=sfn.JsonPath.string_at('$.biweek_end'))
+        ]
+
         # Evaluation Task
         evaluation_task = tasks.EcsRunTask(self, "EvaluationTask",
             cluster=cluster,
@@ -56,13 +69,7 @@ class OrchestrationStack(Stack):
             container_overrides=[
                 tasks.ContainerOverride(
                     container_definition=evaluation_container,
-                    environment=[
-                        tasks.TaskEnvironmentVariable(name="ENV", value=env_name),
-                        tasks.TaskEnvironmentVariable(name="DATA_BUCKET", value=data_bucket.bucket_name),
-                        tasks.TaskEnvironmentVariable(name="MODEL_BUCKET", value=model_bucket.bucket_name),
-                        tasks.TaskEnvironmentVariable(name="JOB_TABLE", value=job_table.table_name),
-                        tasks.TaskEnvironmentVariable(name="MODEL_TABLE", value=model_table.table_name),
-                    ]
+                    environment=task_env_vars
                 )
             ],
             assign_public_ip=True,
@@ -79,13 +86,7 @@ class OrchestrationStack(Stack):
             container_overrides=[
                 tasks.ContainerOverride(
                     container_definition=smx_container,
-                    environment=[
-                        tasks.TaskEnvironmentVariable(name="ENV", value=env_name),
-                        tasks.TaskEnvironmentVariable(name="DATA_BUCKET", value=data_bucket.bucket_name),
-                        tasks.TaskEnvironmentVariable(name="MODEL_BUCKET", value=model_bucket.bucket_name),
-                        tasks.TaskEnvironmentVariable(name="JOB_TABLE", value=job_table.table_name),
-                        tasks.TaskEnvironmentVariable(name="MODEL_TABLE", value=model_table.table_name),
-                    ]
+                    environment=task_env_vars
                 )
             ],
             assign_public_ip=True,
@@ -103,13 +104,7 @@ class OrchestrationStack(Stack):
             container_overrides=[
                 tasks.ContainerOverride(
                     container_definition=xgbsr_container,
-                    environment=[
-                        tasks.TaskEnvironmentVariable(name="ENV", value=env_name),
-                        tasks.TaskEnvironmentVariable(name="DATA_BUCKET", value=data_bucket.bucket_name),
-                        tasks.TaskEnvironmentVariable(name="MODEL_BUCKET", value=model_bucket.bucket_name),
-                        tasks.TaskEnvironmentVariable(name="JOB_TABLE", value=job_table.table_name),
-                        tasks.TaskEnvironmentVariable(name="MODEL_TABLE", value=model_table.table_name),
-                    ]
+                    environment=task_env_vars
                 )
             ],
             assign_public_ip=True,
@@ -140,7 +135,11 @@ class OrchestrationStack(Stack):
         preprocessing_task = tasks.LambdaInvoke(self, "PreprocessingTask",
             lambda_function=preprocessing_lambda,
             payload=sfn.TaskInput.from_object({
-                'date': sfn.JsonPath.string_at('$.date')
+                'date': sfn.JsonPath.string_at('$.date'),
+                'year': sfn.JsonPath.number_at('$.year'),
+                'biweek_num': sfn.JsonPath.number_at('$.biweek_num'),
+                'biweek_start': sfn.JsonPath.string_at('$.biweek_start'),
+                'biweek_end': sfn.JsonPath.string_at('$.biweek_end')
             }),
             result_path=sfn.JsonPath.DISCARD,
             integration_pattern=sfn.IntegrationPattern.REQUEST_RESPONSE,
@@ -213,6 +212,15 @@ def is_trigger_date(date_str):
     d = datetime.strptime(date_str, '%Y-%m-%d')
     last_day = monthrange(d.year, d.month)[1]
     return d.day == 15 or d.day == last_day
+                                          
+def calculate_biweek(date_str):
+    d = datetime.strptime(date_str, '%Y-%m-%d')
+    month = d.month
+    day = d.day
+    biweek_in_month = 1 if day <= 15 else 2
+    biweek_start = datetime(d.year, month, 1) if biweek_in_month == 1 else datetime(d.year, month, 16)
+    biweek_end = datetime(d.year, month, 15) if biweek_in_month == 1 else datetime(d.year, month, monthrange(d.year, month)[1])
+    return d.year, ((month - 1) * 2) + biweek_in_month, biweek_start, biweek_end
 
 def handler(event, context):
     for record in event['Records']:
@@ -234,10 +242,17 @@ def handler(event, context):
                 except sfn.exceptions.ExecutionDoesNotExist:
                     print(f"Starting execution for date {date_str}")
                     pass
+                year, biweek_num, biweek_start, biweek_end = calculate_biweek(date_str)
                 sfn.start_execution(
                     stateMachineArn=os.environ['STATE_MACHINE_ARN'],
                     name=date_str,  # Use date as execution name
-                    input=json.dumps({'date': date_str})
+                    input=json.dumps({
+                        'date': date_str,
+                        'year': year,
+                        'biweek_num': biweek_num,
+                        'biweek_start': biweek_start.strftime('%Y-%m-%d'),
+                        'biweek_end': biweek_end.strftime('%Y-%m-%d')
+                        })
                 )
         except (IndexError, ValueError):
             print(f"Could not extract date from key: {s3_key}")

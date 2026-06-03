@@ -71,57 +71,6 @@ def marker_exists(s3_client, bucket, prefix):
         return False
 
 
-def get_latest_biweek(s3_client, bucket):
-    """Determine the latest biweek number available in S3 based on folder structure.
-    
-    Args:
-        s3_client: The S3 client.
-        bucket: The S3 bucket name.
-
-    Returns:
-        A tuple containing the latest year and biweek number.
-    """
-    try:
-        paginator = s3_client.get_paginator('list_objects_v2')
-        latest_year = None
-        latest_biweek = None
-        
-        # First level: get year folders
-        pages = paginator.paginate(Bucket=bucket, Prefix=SUBPRIME_INPUT_PREFIX, Delimiter='/')
-        year_folders = []
-        for page in pages:
-            for prefix in page.get('CommonPrefixes', []):
-                year_folders.append(prefix['Prefix'])
-        
-        # Second level: for each year, get biweek folders
-        for year_folder in year_folders:
-            pages = paginator.paginate(Bucket=bucket, Prefix=year_folder, Delimiter='/')
-            for page in pages:
-                for prefix in page.get('CommonPrefixes', []):
-                    biweek_folder = prefix['Prefix']
-                    # Extract year and biweek from path like "processed/sarimax-subprime/biweekly/2017/BW-13/"
-                    parts = biweek_folder.rstrip('/').split('/')
-                    if len(parts) >= 2:
-                        try:
-                            year = int(parts[-2])
-                            biweek_str = parts[-1]
-                            if biweek_str.startswith('BW-'):
-                                biweek_num = int(biweek_str.replace('BW-', ''))
-                                if (latest_biweek is None) or (latest_year is None) or (year > latest_year) or (year == latest_year and biweek_num > latest_biweek):
-                                    latest_year = year
-                                    latest_biweek = biweek_num
-                        except (ValueError, IndexError):
-                            continue
-        
-        return latest_year, latest_biweek
-    except ClientError as e:
-        print(f"Error fetching latest biweek number: {e}")
-        return None, None
-    except Exception as e:
-        print(f"Unexpected error fetching latest biweek number: {e}")
-        return None, None
-
-
 def load_subprime_data(s3_client, bucket_name, year, biweek_num):
     """Load subprime data from S3 for the specified year and biweek number.
     
@@ -706,33 +655,32 @@ if __name__ == "__main__":
             if not model_table_name:
                 raise ValueError("MODEL_TABLE environment variable not set")
             print(f"Model Table: {model_table_name}\n")
+            year = os.environ.get('YEAR')
+            if not year:
+                raise ValueError("YEAR environment variable not set")
+            print(f"Year: {year}\n")
+            biweek_num = os.environ.get('BIWEEK_NUM')
+            if not biweek_num:
+                raise ValueError("BIWEEK_NUM environment variable not set")
+            print(f"Biweek Number: {biweek_num}\n")
         except Exception as e:
             error_msg = f"Failed to retrieve bucket name: {e}"
             print(f"✗ {error_msg}")
             sys.exit(1)
-        
-        # Step 1: Get latest biweek number
-        print("[1/13] Getting latest biweek number...")
-        year, biweek_num = get_latest_biweek(s3_client, data_bucket_name)
-        if year is None or biweek_num is None:
-            error_msg = "Could not determine latest biweek number from S3"
-            print(f"✗ {error_msg}")
-            sys.exit(1)
-        print(f"Latest biweek number: {year}-BW-{biweek_num}")
 
         # Step 2: Check for subprime data marker
-        print(f"\n[2/13] Checking for subprime data marker in s3://{data_bucket_name}/{SUBPRIME_INPUT_PREFIX}{year}/BW-{biweek_num}...")
+        print(f"\n[1/12] Checking for subprime data marker in s3://{data_bucket_name}/{SUBPRIME_INPUT_PREFIX}{year}/BW-{biweek_num}...")
         if not marker_exists(s3_client, data_bucket_name, f"{SUBPRIME_INPUT_PREFIX}{year}/BW-{biweek_num}/"):
             error_msg = f"Subprime data marker not found for {year}-BW-{biweek_num}. Ensure that the data processing step has completed successfully."
             print(f"ℹ {error_msg}")
             sys.exit(0)
 
         # Step 3: Load subprime data
-        print(f"\n[3/13] Loading subprime data for {year}-BW-{biweek_num}...")
+        print(f"\n[2/12] Loading subprime data for {year}-BW-{biweek_num}...")
         data = load_subprime_data(s3_client, data_bucket_name, year, biweek_num)
 
         # Step 4: Load previous biweek JSONs (lambdas, HMV values, families mapping)
-        print(f"\n[4/13] Loading previous biweek JSONs...")
+        print(f"\n[3/12] Loading previous biweek JSONs...")
         lambdas, hmvs, families = load_jsons(s3_client, data_bucket_name, year, biweek_num)
         if lambdas is None or hmvs is None or families is None:
             error_msg = "Failed to load necessary JSON files for data preparation"
@@ -740,11 +688,11 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 5: Prepare data for SARIMAX
-        print(f"\n[5/13] Preparing data for SARIMAX...")
+        print(f"\n[4/12] Preparing data for SARIMAX...")
         data = prime_data_for_sarimax(data, lambdas, hmvs)
 
         # Step 6: Build time series for SARIMAX
-        print(f"\n[6/13] Building time series for SARIMAX...")
+        print(f"\n[5/12] Building time series for SARIMAX...")
         ts_per_family, ts_per_store = build_time_series(data)
         if ts_per_family is None or ts_per_store is None:
             error_msg = "Failed to build time series for SARIMAX"
@@ -752,15 +700,15 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 7: Load SARIMAX models from S3
-        print(f"\n[7/13] Loading SARIMAX models from S3...")
-        smx_per_family, smx_per_store = load_sarimax_models(s3_client, model_bucket_name, families,year, biweek_num)
+        print(f"\n[6/12] Loading SARIMAX models from S3...")
+        smx_per_family, smx_per_store = load_sarimax_models(s3_client, model_bucket_name, families, year, biweek_num)
         if smx_per_family is None or smx_per_store is None:
             error_msg = "Failed to load SARIMAX models from S3"
             print(f"✗ {error_msg}")
             sys.exit(1)
         
         # Step 8: Generate inferences from SARIMAX models
-        print(f"\n[8/13] Generating inferences from SARIMAX models...")
+        print(f"\n[7/12] Generating inferences from SARIMAX models...")
         forecast_per_family, forecast_per_store = generate_inferences(ts_per_family, ts_per_store, smx_per_family, smx_per_store)
         if forecast_per_family is None or forecast_per_store is None:
             error_msg = "Failed to generate inferences from SARIMAX models"
@@ -768,7 +716,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 9: Evaluate SARIMAX inferences
-        print(f"\n[9/13] Evaluating SARIMAX inferences...")
+        print(f"\n[8/12] Evaluating SARIMAX inferences...")
         evaluation_results = eval_sarimax_inferences(forecast_per_family, forecast_per_store, ts_per_family, ts_per_store)
         if evaluation_results is None:
             error_msg = "Failed to evaluate SARIMAX inferences"
@@ -776,7 +724,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 10: Prepare data for XGBoost
-        print(f"\n[10/13] Preparing data for XGBoost...")
+        print(f"\n[9/12] Preparing data for XGBoost...")
         X, y = prime_data_for_xgboost(data, forecast_per_family, forecast_per_store)
         if X is None or y is None:
             error_msg = "Failed to prepare data for XGBoost"
@@ -784,7 +732,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 11: Load XGBoost model from S3
-        print(f"\n[11/13] Loading XGBoost model from S3...")
+        print(f"\n[10/12] Loading XGBoost model from S3...")
         model, feature_names, model_job_id = load_xgboost_model(dynamodb_resource, s3_client, model_table_name, model_bucket_name)
         if model is None or feature_names is None or model_job_id is None:
             error_msg = "Failed to load XGBoost model from S3 or model job ID from DynamoDB"
@@ -792,7 +740,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 12: Evaluate XGBoost model
-        print(f"\n[12/13] Evaluating XGBoost model...")
+        print(f"\n[11/12] Evaluating XGBoost model...")
         xgboost_rmsle = evaluate_xgboost_model(model, X, y, feature_names, lambdas['lmbda_sales'])
         if xgboost_rmsle is None:
             error_msg = "Failed to evaluate XGBoost model"
@@ -800,7 +748,7 @@ if __name__ == "__main__":
             sys.exit(1)
         
         # Step 13: Save evaluation results to DynamoDB
-        print(f"\n[13/13] Saving evaluation results to DynamoDB...")
+        print(f"\n[12/12] Saving evaluation results to DynamoDB...")
         save_evaluation_results(
             dynamodb_resource,
             job_table_name,

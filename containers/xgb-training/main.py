@@ -69,65 +69,23 @@ def write_marker(s3_client, bucket, prefix):
     s3_client.put_object(Bucket=bucket, Key=f"{prefix}{MARKER}", Body=b'')
 
 
-def load_sarimax_prime_data(s3_client, bucket_name):
+def load_sarimax_prime_data(s3_client, bucket_name, year, biweek_num):
     """Load latest biweekly SARIMAX prime data from S3.
     
     Returns:
         tuple: (data DataFrame, latest_year, latest_biweek)
     """
     try:
-        print(f"\n[S3] Finding latest biweekly SARIMAX prime data...")
-        
-        paginator = s3_client.get_paginator('list_objects_v2')
-        latest_year = None
-        latest_biweek = None
-        
-        # Discover all year folders
-        pages = paginator.paginate(Bucket=bucket_name, Prefix=SARIMAX_PRIME_PREFIX, Delimiter='/')
-        year_folders = []
-        for page in pages:
-            for prefix in page.get('CommonPrefixes', []):
-                year_folders.append(prefix['Prefix'])
-        
-        if not year_folders:
-            raise Exception(f"No year folders found in s3://{bucket_name}/{SARIMAX_PRIME_PREFIX}")
-        
-        # Find latest year and biweek
-        for year_folder in year_folders:
-            year = int(year_folder.rstrip('/').split('/')[-1])
-            
-            pages = paginator.paginate(Bucket=bucket_name, Prefix=year_folder, Delimiter='/')
-            for page in pages:
-                for prefix in page.get('CommonPrefixes', []):
-                    biweek_folder = prefix['Prefix']
-                    biweek_str = biweek_folder.rstrip('/').split('/')[-1]
-                    
-                    if biweek_str.startswith('BW-'):
-                        try:
-                            biweek_num = int(biweek_str.replace('BW-', ''))
-                            
-                            if (latest_biweek is None) or (latest_year is None) or \
-                                (year > latest_year) or (year == latest_year and biweek_num > latest_biweek):
-                                latest_year = year
-                                latest_biweek = biweek_num
-                        except (ValueError, IndexError):
-                            continue
-        
-        if latest_year is None or latest_biweek is None:
-            raise Exception("Could not determine latest biweek from folder structure")
-        
-        print(f"  ✓ Found latest biweek: {latest_year}/BW-{latest_biweek}")
-        
-        # Load only the latest biweek's data
-        print(f"  Loading data for {latest_year}/BW-{latest_biweek}...")
+        # Load only the specified biweek's data
+        print(f"  Loading data for {year}/BW-{biweek_num}...")
         response = s3_client.get_object(
             Bucket=bucket_name,
-            Key=f'{SARIMAX_PRIME_PREFIX}{latest_year}/BW-{latest_biweek}/data.parquet'
+            Key=f'{SARIMAX_PRIME_PREFIX}{year}/BW-{biweek_num}/data.parquet'
         )
         data = pd.read_parquet(BytesIO(response['Body'].read()))
         print(f"  ✓ Loaded {len(data)} rows, {len(data.columns)} columns")
         
-        return data, latest_year, latest_biweek
+        return data
         
     except Exception as e:
         raise Exception(f"Failed to load SARIMAX prime data: {e}")
@@ -646,20 +604,25 @@ if __name__ == '__main__':
             if not model_table_name:
                 raise ValueError("MODEL_TABLE environment variable not set")
             print(f"Model Table: {model_table_name}\n")
+            year = os.environ.get('YEAR')
+            if not year:
+                raise ValueError("YEAR environment variable not set")
+            print(f"Year: {year}\n")
+            biweek_num = os.environ.get('BIWEEK_NUM')
+            if not biweek_num:
+                raise ValueError("BIWEEK_NUM environment variable not set")
+            print(f"Biweek Number: {biweek_num}\n")
         except Exception as e:
             error_msg = f"Failed to retrieve bucket name: {e}"
             print(f"✗ {error_msg}")
             sys.exit(1)
 
-        # Step 1: Load all biweekly SARIMAX prime data
-        print("[1/14] Loading all biweekly SARIMAX prime data...")
-        prime_data, year, biweek_num = load_sarimax_prime_data(s3_client, data_bucket_name)
-        if year is None or biweek_num is None:
-            print("✗ Error: Could not determine latest biweek from loaded data")
-            sys.exit(1)
         latest_biweek = f"{year}/BW-{biweek_num}"
         biweek_prefix = f"{latest_biweek}/"
-        print(f"✓ Latest biweek: {latest_biweek}")
+
+        # Step 1: Load all biweekly SARIMAX prime data
+        print("[1/14] Loading all biweekly SARIMAX prime data...")
+        prime_data = load_sarimax_prime_data(s3_client, data_bucket_name, year, biweek_num)
         
         # Step 2: Check for marker file indicating processed data is ready
         print(f"\n[2/14] Checking for processed data marker in s3://{data_bucket_name}/{SARIMAX_PRIME_PREFIX}{biweek_prefix}")

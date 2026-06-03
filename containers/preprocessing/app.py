@@ -17,7 +17,6 @@ MARKER = '_COMPLETE'
 BIWEEKLY_INPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
 BIWEEKLY_OUTPUT_PREFIX = 'processed/sarimax-subprime/biweekly/'
 BIWEEKLY_DATASET_NAMES = ['holidays_events', 'oil', 'train', 'transactions']
-CUTOFF_DATE = datetime(2017, 7, 15)  # Storage starts at 2017/BW-14
 
 
 class IO(Enum):
@@ -42,84 +41,6 @@ def marker_exists(s3_client, bucket, prefix):
 
 def write_marker(s3_client, bucket, prefix):
     s3_client.put_object(Bucket=bucket, Key=f"{prefix}{MARKER}", Body=b'')
-
-
-def get_latest_daily_folder(s3_client, bucket_name):
-    """Get the latest folder date from raw/daily/.
-    
-    Returns:
-        tuple: (datetime object, folder_prefix) or (None, None) if no folders found
-    """
-    try:
-        paginator = s3_client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=bucket_name, Prefix='raw/daily/')
-        
-        latest_date = None
-        latest_prefix = None
-        
-        for page in pages:
-            if 'Contents' not in page:
-                continue
-            
-            for obj in page['Contents']:
-                key = obj['Key']
-                # Parse folders like raw/daily/2024/01/15/
-                parts = key.rstrip('/').split('/')
-                if len(parts) >= 5 and parts[0] == 'raw' and parts[1] == 'daily' and parts[2] and parts[3] and parts[4]:
-                    try:
-                        year, month, day = int(parts[2]), int(parts[3]), int(parts[4])
-                        folder_date = datetime(year, month, day)
-                        if latest_date is None or folder_date > latest_date:
-                            latest_date = folder_date
-                            latest_prefix = f"raw/daily/{year}/{month:02d}/{day:02d}/"
-                    except (ValueError, TypeError):
-                        continue
-        
-        return latest_date, latest_prefix
-    except Exception as e:
-        print(f"Error listing daily folders: {e}")
-        return None, None
-
-
-def is_trigger_date(date_obj):
-    """Check if date is a trigger date."""
-    last_day = monthrange(date_obj.year, date_obj.month)[1]
-    return date_obj.day == 15 or date_obj.day == last_day
-
-
-def calculate_biweek_number(date_obj):
-    """Calculate biweek number starting from CUTOFF_DATE (2017/07/15 = BW-13).
-    
-    Returns:
-        tuple: (year, biweek_number, start_date, end_date)
-    """
-    # Extract year and month to determine biweek label
-    year = date_obj.year
-    month = date_obj.month
-    day = date_obj.day
-    
-    # Determine which biweek within the month
-    if day <= 15:
-        biweek_in_month = 1
-        biweek_start = datetime(year, month, 1)
-        biweek_end = datetime(year, month, 15)
-    else:
-        biweek_in_month = 2
-        biweek_start = datetime(year, month, 16)
-        # End of month
-        if month == 12:
-            biweek_end = datetime(year + 1, 1, 1) - timedelta(days=1)
-        else:
-            biweek_end = datetime(year, month + 1, 1) - timedelta(days=1)
-
-    # Calculate biweeks since cutoff
-    months_since_cutoff = (date_obj.year - CUTOFF_DATE.year) * 12 + (date_obj.month - CUTOFF_DATE.month)
-    biweeks_since_cutoff = (months_since_cutoff * 2) + (biweek_in_month - 1)
-    
-    # BW-14 starts at CUTOFF_DATE
-    global_biweek = 13 + biweeks_since_cutoff
-    
-    return year, global_biweek, biweek_start, biweek_end
 
 
 def load_daily_csvs(s3_client, bucket_name, biweek_start, biweek_end):
@@ -332,7 +253,12 @@ def lambda_handler(event, context):
     """AWS Lambda handler for biweekly SARIMAX Prime processing.
     
     Args:
-        event: Lambda event (unused for S3 trigger)
+        event: Lambda event from Step Functions with keys:
+            - date: ISO date string (YYYY-MM-DD)
+            - year: Integer year
+            - biweek_num: Integer biweek number
+            - biweek_start: ISO date string (YYYY-MM-DD)
+            - biweek_end: ISO date string (YYYY-MM-DD)
         context: Lambda context
     
     Returns:
@@ -345,7 +271,7 @@ def lambda_handler(event, context):
         print("Biweekly SARIMAX Prime Data Processing Lambda")
         print("=" * 70)
         
-        # Get bucket name from CloudFormation exports
+        # Get bucket name and input parameters
         s3_client = boto3.client('s3')
         try:
             bucket_name = os.environ.get('DATA_BUCKET')
@@ -361,39 +287,36 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': error_msg})
             }
         
-        # Step 1: Get latest daily folder
-        print("[1/9] Checking latest daily upload...")
-        latest_date, latest_prefix = get_latest_daily_folder(s3_client, bucket_name)
-        
-        if latest_date is None:
-            error_msg = "No daily folders found in raw/daily/"
+        # Step 1: Extract payload parameters from Step Functions
+        print("[1/7] Extracting parameters from Step Functions payload...")
+        try:
+            date_str = event.get('date')
+            year = event.get('year')
+            biweek_num = event.get('biweek_num')
+            biweek_start_str = event.get('biweek_start')
+            biweek_end_str = event.get('biweek_end')
+            
+            if not all([date_str, year is not None, biweek_num is not None, biweek_start_str, biweek_end_str]):
+                raise ValueError("Missing required payload parameters: date, year, biweek_num, biweek_start, biweek_end")
+            
+            # Parse date strings to datetime objects
+            process_date = datetime.strptime(date_str, '%Y-%m-%d')
+            biweek_start = datetime.strptime(biweek_start_str, '%Y-%m-%d')
+            biweek_end = datetime.strptime(biweek_end_str, '%Y-%m-%d')
+            
+            print(f"✓ Date: {process_date.date()}")
+            print(f"✓ Year: {year}, Biweek: {biweek_num}")
+            print(f"✓ Period: {biweek_start.date()} to {biweek_end.date()}")
+        except (KeyError, ValueError, TypeError) as e:
+            error_msg = f"Failed to extract payload parameters: {e}"
             print(f"✗ {error_msg}")
             return {
                 'statusCode': 400,
                 'body': json.dumps({'error': error_msg})
             }
         
-        print(f"✓ Latest folder: {latest_date.date()}")
-        
-        # Step 2: Check if trigger date
-        print("\n[2/9] Checking if date is a trigger date...")
-        if not is_trigger_date(latest_date):
-            msg = f"Date {latest_date.date()} is not a trigger date. Skipping processing."
-            print(f"ℹ {msg}")
-            return {
-                'statusCode': 200,
-                'body': json.dumps({'message': msg})
-            }
-        print(f"✓ {latest_date.date()} is a trigger date")
-        
-        # Step 3: Calculate biweek
-        print("\n[3/9] Calculating biweek parameters...")
-        year, biweek_num, biweek_start, biweek_end = calculate_biweek_number(latest_date)
-        print(f"✓ Year: {year}, Biweek: {biweek_num}")
-        print(f"  Period: {biweek_start.date()} to {biweek_end.date()}")
-        
-        # Step 4: Check if processing has already been completed
-        print("\n[4/9] Checking if processing has already been completed...")
+        # Step 2: Check if processing has already been completed
+        print("\n[2/7] Checking if processing has already been completed...")
         if marker_exists(s3_client, bucket_name, get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT)):
             print("✗ Error: Processing workflow has already been completed.")
             return {
@@ -402,8 +325,8 @@ def lambda_handler(event, context):
             }
         print("✓ No marker found. Ready to proceed with processing.")
         
-        # Step 6: Load and concatenate daily CSVs
-        print("\n[5/9] Loading daily CSVs from biweek period...")
+        # Step 3: Load and concatenate daily CSVs
+        print("\n[3/7] Loading daily CSVs from biweek period...")
         datasets = load_daily_csvs(s3_client, bucket_name, biweek_start, biweek_end)
         if datasets is None:
             error_msg = "Failed to load datasets from daily CSVs"
@@ -414,7 +337,7 @@ def lambda_handler(event, context):
             }
         
         # Step 7: Load stores CSV
-        print("\n[6/9] Loading stores.csv for feature engineering...")
+        print("\n[4/7] Loading stores.csv for feature engineering...")
         stores = load_stores_csv(s3_client, bucket_name)
         if stores is None:
             error_msg = "Failed to load stores.csv"
@@ -426,11 +349,11 @@ def lambda_handler(event, context):
         datasets['stores'] = stores
         
         # Step 8: Apply SARIMAX Prime transformations
-        print("\n[7/9] Processing data with SARIMAX Prime transformations...")
+        print("\n[5/7] Processing data with SARIMAX Prime transformations...")
         processed_data = apply_sarimax_prime_transforms(datasets)
         
         # Step 9: Upload to S3
-        print("\n[8/9] Uploading processed data to S3...")
+        print("\n[6/7] Uploading processed data to S3...")
         upload_success = upload_biweekly_data(s3_client, bucket_name, processed_data, year, biweek_num)
         
         if not upload_success:
@@ -442,7 +365,7 @@ def lambda_handler(event, context):
             }
         
         # Step 10: Write marker
-        print("\n[9/9] Finalizing...")
+        print("\n[7/7] Finalizing...")
         write_marker(s3_client, bucket_name, get_full_biweekly_prefix(year, biweek_num, IO.OUTPUT))
         
         print("\n" + "=" * 70)
