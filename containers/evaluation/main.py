@@ -26,6 +26,7 @@ MARKER = '_COMPLETE'
 SUBPRIME_INPUT_PREFIX = 'processed/sarimax-subprime/biweekly/'
 PRIME_INPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
 SIGNIFICANT_EXOG = ['hmv', 'exists_promotion', 'exists_transaction']
+FIRST_BIWEEK = 13
 
 # Time series construction parameters
 PERIOD_MAP = {
@@ -98,7 +99,7 @@ def get_latest_biweek(s3_client, bucket):
             for page in pages:
                 for prefix in page.get('CommonPrefixes', []):
                     biweek_folder = prefix['Prefix']
-                    # Extract year and biweek from path like "processed/sarimax-subprime/biweekly/2017/BW-14/"
+                    # Extract year and biweek from path like "processed/sarimax-subprime/biweekly/2017/BW-13/"
                     parts = biweek_folder.rstrip('/').split('/')
                     if len(parts) >= 2:
                         try:
@@ -158,7 +159,7 @@ def load_jsons(s3_client, bucket_name, year, biweek_num):
     """
     try:
         print(f"\n[S3] Loading lambda and HMV values...")
-        if biweek_num == 14:
+        if biweek_num == FIRST_BIWEEK:
             json_prefix = 'processed/sarimax-prime/historical/'
         else:
             json_prefix = f"{PRIME_INPUT_PREFIX}{year}/BW-{biweek_num - 1}/"
@@ -308,7 +309,7 @@ def load_sarimax_models(s3_client, bucket_name, families, year, biweek_num):
     smx_per_store = {}
 
     try:
-        if biweek_num == 14:
+        if biweek_num == FIRST_BIWEEK:
             model_prefix = 'sarimax/historical/'
         else:
             model_prefix = f"sarimax/biweekly/{year}/BW-{biweek_num - 1}/"
