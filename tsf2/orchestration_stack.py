@@ -145,12 +145,108 @@ class OrchestrationStack(Stack):
             integration_pattern=sfn.IntegrationPattern.REQUEST_RESPONSE,
         )
 
-        # Chain preprocessing to parallel tasks
-        preprocessing_task.next(parallel)
+        # Execution tracking table (for automatic execution infrastructure)
+        exec_table = dynamodb.Table(self, "ExecutionTable",
+            partition_key=dynamodb.Attribute(name="pk", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
+            removal_policy=removal,
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            time_to_live_attribute="ttl"
+        )
+
+        # Manually construct state machine ARN (known before creation)
+        state_machine_name = f"{env_name}-tsf2-state-machine"
+        state_machine_arn = f"arn:aws:states:{self.region}:{self.account}:stateMachine:{state_machine_name}"
+
+        # Completion Lambda
+        completion_lambda_log_group = logs.LogGroup(self, "CompletionLambdaLogGroup",
+            log_group_name=f"/aws/lambda/{env_name}-tsf2-completion",
+            retention=logs.RetentionDays.ONE_MONTH if env_name == "prod" else logs.RetentionDays.ONE_WEEK,
+            removal_policy=removal
+        )
+
+        completion_lambda = _lambda.Function(self, "CompletionLambda",
+            function_name=f"{env_name}-tsf2-completion",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="index.handler",
+            code=_lambda.Code.from_inline("""import json
+import os
+import boto3
+from botocore.exceptions import ClientError
+
+sfn = boto3.client('stepfunctions')
+dynamodb = boto3.resource('dynamodb')
+
+def handler(event, context):
+    table = dynamodb.Table(os.environ['EXEC_TABLE'])
+    current_date = event.get('date')
+    
+    if not current_date:
+        print("No date in event, skipping")
+        return {'statusCode': 200}
+    
+    try:
+        # Delete current job
+        table.delete_item(
+            Key={'pk': 'jobs', 'sk': current_date},
+            ConditionExpression='attribute_exists(sk)'
+        )
+        print(f"Completed and removed job for {current_date}")
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            print(f"Error deleting job: {e}")
+        # Continue even if delete fails (idempotent)
+    
+    try:
+        # Query next pending job (earliest date)
+        response = table.query(
+            KeyConditionExpression='pk = :pk',
+            FilterExpression='#status = :status',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={':pk': 'jobs', ':status': 'pending'},
+            Limit=1,
+            ConsistentRead=True
+        )
+        
+        if response['Items']:
+            next_job = response['Items'][0]
+            job_data = next_job.get('data', {})
+            next_date = next_job['sk']
+            
+            print(f"Starting next job for {next_date}")
+            sfn.start_execution(
+                stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                input=json.dumps(job_data)
+            )
+        else:
+            print("No pending jobs in queue")
+    except ClientError as e:
+        print(f"Error querying next job: {e}")
+    
+    return {'statusCode': 200}"""),
+            environment={
+                "STATE_MACHINE_ARN": state_machine_arn,
+                "EXEC_TABLE": exec_table.table_name
+            },
+            log_group=completion_lambda_log_group,
+        )
+
+        # Completion task to dequeue and process next job
+        completion_task = tasks.LambdaInvoke(self, "CompletionTask",
+            lambda_function=completion_lambda,
+            payload=sfn.TaskInput.from_object({
+                'date': sfn.JsonPath.string_at('$.date')
+            }),
+            result_path=sfn.JsonPath.DISCARD,
+            integration_pattern=sfn.IntegrationPattern.REQUEST_RESPONSE,
+        )
+
+        # Chain preprocessing to parallel tasks to completion
+        preprocessing_task.next(parallel).next(completion_task)
 
         # State machine
         self.state_machine = sfn.StateMachine(self, "TSF2StateMachine",
-            state_machine_name=f"{env_name}-tsf2-state-machine",
+            state_machine_name=state_machine_name,
             definition_body=sfn.DefinitionBody.from_chainable(preprocessing_task),
             logs=sfn.LogOptions(
                 destination=sm_log_group,
@@ -158,6 +254,10 @@ class OrchestrationStack(Stack):
             ),
             tracing_enabled=True
         )
+
+        # Completion Lambda IAM grants
+        exec_table.grant_read_write_data(completion_lambda)
+        self.state_machine.grant_start_execution(completion_lambda)
 
         # ── Step Functions IAM grants ──
         # evaluation_task_def.task_role.grant_pass_role(evaluation_task_def.task_role)
@@ -167,7 +267,7 @@ class OrchestrationStack(Stack):
         model_table.grant_read_write_data(self.state_machine)
 
         # ── Automatic execution infrastructure ──
-        # SQS queue
+        # SQS queue for S3 events
         trigger_queue = sqs.Queue(self, "TriggerQueue",
             queue_name=f"{env_name}-tsf2-trigger",
             visibility_timeout=Duration.minutes(15),
@@ -205,8 +305,10 @@ import os
 import boto3
 from datetime import datetime
 from calendar import monthrange
+from botocore.exceptions import ClientError
 
 sfn = boto3.client('stepfunctions')
+dynamodb = boto3.resource('dynamodb')
 
 def is_trigger_date(date_str):
     d = datetime.strptime(date_str, '%Y-%m-%d')
@@ -223,42 +325,85 @@ def calculate_biweek(date_str):
     return d.year, ((month - 1) * 2) + biweek_in_month, biweek_start, biweek_end
 
 def handler(event, context):
+    table = dynamodb.Table(os.environ['EXEC_TABLE'])
+    
     for record in event['Records']:
         body = json.loads(record['body'])
-        # EventBridge events come through SQS as detail field
         s3_detail = body.get('detail', {})
         s3_key = s3_detail.get('object', {}).get('key', '')
-        # Extract date from raw/daily/YYYY/MM/DD/...
+        
         try:
             key = s3_key.split('/')
             date_str = '-'.join(key[2:5])
-            if is_trigger_date(date_str) and key[-1] == 'train.csv':
-                try:
-                    sfn.describe_execution(
-                        executionArn=f"{os.environ['STATE_MACHINE_ARN'].replace(':stateMachine:', ':execution:')}:{date_str}"
-                    )
-                    print(f"Execution for {date_str} already exists, skipping")
-                    continue
-                except sfn.exceptions.ExecutionDoesNotExist:
-                    print(f"Starting execution for date {date_str}")
-                    pass
-                year, biweek_num, biweek_start, biweek_end = calculate_biweek(date_str)
-                sfn.start_execution(
-                    stateMachineArn=os.environ['STATE_MACHINE_ARN'],
-                    name=date_str,  # Use date as execution name
-                    input=json.dumps({
-                        'date': date_str,
-                        'year': year,
-                        'biweek_num': biweek_num,
-                        'biweek_start': biweek_start.strftime('%Y-%m-%d'),
-                        'biweek_end': biweek_end.strftime('%Y-%m-%d')
-                        })
+            if not (is_trigger_date(date_str) and key[-1] == 'train.csv'):
+                continue
+            
+            year, biweek_num, biweek_start, biweek_end = calculate_biweek(date_str)
+            job_data = {
+                'date': date_str,
+                'year': year,
+                'biweek_num': biweek_num,
+                'biweek_start': biweek_start.strftime('%Y-%m-%d'),
+                'biweek_end': biweek_end.strftime('%Y-%m-%d')
+            }
+            
+            # Check if job already running for this date
+            try:
+                response = table.get_item(
+                    Key={'pk': 'jobs', 'sk': date_str},
+                    ConsistentRead=True
                 )
-        except (IndexError, ValueError):
-            print(f"Could not extract date from key: {s3_key}")
+                if 'Item' in response:
+                    print(f"Job for {date_str} already exists, skipping")
+                    continue
+            except ClientError as e:
+                print(f"Error checking job: {e}")
+                continue
+            
+            # Atomically insert job with conditional write
+            try:
+                table.put_item(
+                    Item={
+                        'pk': 'jobs',
+                        'sk': date_str,
+                        'status': 'pending',
+                        'data': job_data
+                    },
+                    ConditionExpression='attribute_not_exists(sk)'
+                )
+                print(f"Queued job for {date_str}")
+                
+                # Check if this is the only job (queue was empty)
+                response = table.scan(
+                    FilterExpression='#status = :status',
+                    ExpressionAttributeNames={'#status': 'status'},
+                    ExpressionAttributeValues={':status': 'pending'},
+                    Select='COUNT',
+                    ConsistentRead=True
+                )
+                
+                if response['Count'] == 1:  # Only our newly inserted job
+                    print(f"Queue was empty, starting execution for {date_str}")
+                    sfn.start_execution(
+                        stateMachineArn=os.environ['STATE_MACHINE_ARN'],
+                        input=json.dumps(job_data)
+                    )
+                else:
+                    print(f"Queue has {response['Count']} pending jobs, queueing only")
+                    
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                    print(f"Job for {date_str} already queued/running, skipping")
+                else:
+                    print(f"Error inserting job: {e}")
+                    
+        except (IndexError, ValueError) as e:
+            print(f"Could not extract date from key: {s3_key}, error: {e}")
+    
     return {'statusCode': 200}"""),
             environment={
-                "STATE_MACHINE_ARN": self.state_machine.state_machine_arn
+                "STATE_MACHINE_ARN": self.state_machine.state_machine_arn,
+                "EXEC_TABLE": exec_table.table_name
             },
             log_group=trigger_lambda_log_group,
         )
@@ -275,5 +420,6 @@ def handler(event, context):
             actions=["states:DescribeExecution"],
             resources=[f"arn:aws:states:{self.region}:{self.account}:execution:{self.state_machine.state_machine_name}:*"]
         ))
+        exec_table.grant_read_write_data(trigger_lambda)
         trigger_queue.grant_consume_messages(trigger_lambda)
         self.state_machine.grant_start_execution(trigger_lambda)
