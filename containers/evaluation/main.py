@@ -655,11 +655,11 @@ if __name__ == "__main__":
             if not model_table_name:
                 raise ValueError("MODEL_TABLE environment variable not set")
             print(f"Model Table: {model_table_name}\n")
-            year = os.environ.get('YEAR')
+            year = int(os.environ.get('YEAR'))
             if not year:
                 raise ValueError("YEAR environment variable not set")
             print(f"Year: {year}\n")
-            biweek_num = os.environ.get('BIWEEK_NUM')
+            biweek_num = int(os.environ.get('BIWEEK_NUM'))
             if not biweek_num:
                 raise ValueError("BIWEEK_NUM environment variable not set")
             print(f"Biweek Number: {biweek_num}\n")
