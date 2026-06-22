@@ -1,0 +1,5 @@
+scipy
+pandas
+numpy
+boto3
+pyarrow
