@@ -1,58 +1,92 @@
+# TSF2 — Time Series Forecasting Pipeline
 
-# Welcome to your CDK Python project!
+AWS-native pipeline that trains and periodically retrains store-sales forecasting models on biweekly data. Uses SARIMAX per family/store, an XGBoost stacking ensemble, and automated orchestration via Step Functions.
 
-This is a blank project for CDK development with Python.
+Built on the [Kaggle Store Sales Time Series Forecasting](https://www.kaggle.com/competitions/store-sales-time-series-forecasting) dataset. **Dataset files are not included in this repository** and must be obtained separately under Kaggle's terms.
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+## Architecture
 
-This project is set up like a standard Python project.  The initialization
-process also creates a virtualenv within this project, stored under the `.venv`
-directory.  To create the virtualenv it assumes that there is a `python3`
-(or `python` for Windows) executable in your path with access to the `venv`
-package. If for any reason the automatic creation of the virtualenv fails,
-you can create the virtualenv manually.
+S3 uploads trigger a serialized job queue that runs one biweek at a time through preprocessing, evaluation, and model retraining. See [ARCHITECTURE.md](ARCHITECTURE.md) for a concise overview.
 
-To manually create a virtualenv on MacOS and Linux:
+## Repository layout
 
-```
-$ python3 -m venv .venv
-```
+| Path | Purpose |
+|------|---------|
+| `tsf2/` | AWS CDK stacks (storage, compute, orchestration) |
+| `containers/` | Docker images for preprocessing, training, and evaluation |
+| `lambdas/` | Queue enqueue and Step Functions starter functions |
+| `bootstrap/` | One-time scripts to seed historical data and initial models |
+| `simulator/` | Local tool to replay daily uploads into S3 |
+| `tests/` | Unit and CDK synthesis tests |
 
-After the init process completes and the virtualenv is created, you can use the following
-step to activate your virtualenv.
+## Prerequisites
 
-```
-$ source .venv/bin/activate
-```
+- Python 3.12
+- [AWS CDK CLI](https://docs.aws.amazon.com/cdk/v2/guide/cli.html) and an AWS account
+- Docker (for Lambda/ECS container builds)
+- [Kaggle API credentials](https://github.com/Kaggle/kaggle-api) (for dataset download)
 
-If you are a Windows platform, you would activate the virtualenv like this:
+## Setup
 
-```
-% .venv\Scripts\activate.bat
-```
-
-Once the virtualenv is activated, you can install the required dependencies.
-
-```
-$ pip install -r requirements.txt
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-At this point you can now synthesize the CloudFormation template for this code.
+Configure AWS credentials and bootstrap CDK if needed:
 
+```bash
+cdk bootstrap
 ```
-$ cdk synth
+
+Deploy all stacks (defaults to `dev` environment):
+
+```bash
+cdk deploy --all -c env=dev
 ```
 
-To add additional dependencies, for example other CDK libraries, just add
-them to your `requirements.txt` file and rerun the `python -m pip install -r requirements.txt`
-command.
+## Bootstrap (first run)
 
-## Useful commands
+After deploy, run the bootstrap scripts in order to upload historical data and train initial models:
 
- * `cdk ls`          list all stacks in the app
- * `cdk synth`       emits the synthesized CloudFormation template
- * `cdk deploy`      deploy this stack to your default AWS account/region
- * `cdk diff`        compare deployed stack with current state
- * `cdk docs`        open CDK documentation
+```bash
+python bootstrap/1_raw.py
+python bootstrap/2_sarimax_prime.py
+python bootstrap/3_sarimax.py
+python bootstrap/4_xgboost_prime.py
+python bootstrap/5_xgboost.py
+```
 
-Enjoy!
+`1_raw.py` downloads the Kaggle competition data. Alternatively, download manually:
+
+```bash
+cd simulator && ./download.sh
+```
+
+## Simulate live ingestion
+
+Once bootstrapped, replay daily data uploads to trigger the automated pipeline:
+
+```bash
+ENV_NAME=dev python simulator/simulator.py 14   # upload next 14 days
+```
+
+## Development
+
+```bash
+cdk synth
+pytest
+```
+
+## Cost
+
+The pipeline is event-driven: no always-on workers. Costs are near-zero when idle and incurred mainly during biweekly Fargate training/evaluation runs. Destroy non-prod stacks when not in use:
+
+```bash
+cdk destroy --all -c env=dev
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE). Kaggle dataset usage is subject to Kaggle's competition terms.
