@@ -4,71 +4,37 @@ import pickle
 import joblib
 import datetime
 import uuid
-from enum import Enum
 from pathlib import Path
 from io import BytesIO
 from datetime import datetime as dt
-from calendar import monthrange
 from decimal import Decimal
 
 import boto3
 import pandas as pd
 import numpy as np
-from scipy.stats import boxcox
 from scipy.special import inv_boxcox
 from botocore.exceptions import ClientError
 from sklearn.metrics import mean_squared_error
 from sklearn.metrics import mean_squared_log_error
 
+from tsf2_core.biweek import FIRST_BIWEEK
+from tsf2_core.constants import (
+    FAMILIES_MAPPING_KEY,
+    MARKER,
+    PRIME_BIWEEKLY_PREFIX,
+    PRIME_HISTORICAL_PREFIX,
+    SARIMAX_MODEL_BIWEEKLY_PREFIX,
+    SARIMAX_MODEL_HISTORICAL_PREFIX,
+    SIGNIFICANT_EXOG,
+    SUBPRIME_BIWEEKLY_PREFIX,
+    biweek_data_prefix,
+)
+from tsf2_core.s3 import marker_exists
+from tsf2_core.timeseries import build_time_series
+from tsf2_core.transforms import apply_prime_transform
 
-MARKER = '_COMPLETE'
-
-SUBPRIME_INPUT_PREFIX = 'processed/sarimax-subprime/biweekly/'
-PRIME_INPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
-SIGNIFICANT_EXOG = ['hmv', 'exists_promotion', 'exists_transaction']
-FIRST_BIWEEK = 13
-
-# Time series construction parameters
-PERIOD_MAP = {
-    0.25: '2017-05-15',
-    0.5: '2017-02-15',
-    1: '2016-08-15',
-    1.5: '2016-02-15',
-    2.5: '2015-02-15',
-    3.5: '2014-02-15',
-    4: '2013-01-01'
-}
-
-NON_TWO_YEAR_FAMILIES = {
-    'BABY CARE': 1.5, 'BOOKS': 0.5, 'LAWN AND GARDEN': 0.5, 'LIQUOR,WINE,BEER': 1,
-    'MAGAZINES': 1.5, 'AUTOMOTIVE': 4, 'BEAUTY': 4, 'BREAD/BAKERY': 4, 'CLEANING': 4,
-    'DAIRY': 3.5, 'DELI': 4, 'EGGS': 4, 'FROZEN FOODS': 4, 'GROCERY I': 4,
-    'GROCERY II': 4, 'LINGERIE': 4, 'MEATS': 4, 'PERSONAL CARE': 4, 'POULTRY': 3.5,
-    'PREPARED FOODS': 4, 'SEAFOOD': 2.5, 'SCHOOL AND OFFICE SUPPLIES': 1
-}
-
-TWO_YEAR_FAMILIES = {
-    'BEVERAGES', 'CELEBRATION', 'HARDWARE', 'HOME AND KITCHEN I', 'HOME AND KITCHEN II',
-    'HOME APPLIANCES', 'HOME CARE', 'LADIESWEAR', 'PET SUPPLIES', 'PLAYERS AND ELECTRONICS', 'PRODUCE'
-}
-
-NON_TWO_YEAR_STORES = {21: 1, 22: 1.5, 25: 0.5, 42: 1.5, 52: 0.25, 53: 1}
-TWO_YEAR_STORES = {*range(1, 21), 23, 24, *range(26, 42), *range(43, 52), 54}
-
-EXOG_FEATURES = {feature: 'mean' for feature in [
-    'sales', 'onpromotion', 'transactions', 'ntl_holiday', 'rgnl_holiday', 'lcl_holiday', 'hmv', 'exists_promotion',
-    'exists_transaction', 'oil_price_status', 'low_oil_price', 'high_oil_price', 'holiday_type_Additional',
-    'holiday_type_Bridge', 'holiday_type_Event', 'holiday_type_Holiday', 'holiday_type_Transfer',
-    'holiday_type_TransferredHoliday', 'holiday_type_Work Day'
-]}
-
-
-def marker_exists(s3_client, bucket, prefix):
-    try:
-        s3_client.head_object(Bucket=bucket, Key=f"{prefix}{MARKER}")
-        return True
-    except ClientError:
-        return False
+SUBPRIME_INPUT_PREFIX = SUBPRIME_BIWEEKLY_PREFIX
+PRIME_INPUT_PREFIX = PRIME_BIWEEKLY_PREFIX
 
 
 def load_subprime_data(s3_client, bucket_name, year, biweek_num):
@@ -109,9 +75,9 @@ def load_jsons(s3_client, bucket_name, year, biweek_num):
     try:
         print(f"\n[S3] Loading lambda and HMV values...")
         if biweek_num == FIRST_BIWEEK:
-            json_prefix = 'processed/sarimax-prime/historical/'
+            json_prefix = PRIME_HISTORICAL_PREFIX
         else:
-            json_prefix = f"{PRIME_INPUT_PREFIX}{year}/BW-{biweek_num - 1}/"
+            json_prefix = biweek_data_prefix(PRIME_BIWEEKLY_PREFIX, year, biweek_num - 1)
         
         # Load lambda values
         try:
@@ -133,7 +99,7 @@ def load_jsons(s3_client, bucket_name, year, biweek_num):
         
         # Load families mapping
         try:
-            response = s3_client.get_object(Bucket=bucket_name, Key="processed/sarimax-prime/historical/families_mapping.json")
+            response = s3_client.get_object(Bucket=bucket_name, Key=FAMILIES_MAPPING_KEY)
             families = json.loads(response['Body'].read().decode('utf-8'))
             print(f"  ✓ Loaded families mapping for {len(families)} families")
         except Exception as e:
@@ -145,101 +111,7 @@ def load_jsons(s3_client, bucket_name, year, biweek_num):
         error_msg = f"Failed to load previous biweek jsons from S3: {e}"
         print(f"✗ {error_msg}")
         raise Exception(error_msg)
-    
 
-def prime_data_for_sarimax(data, lambdas, hmvs):
-    """Apply Box-Cox transformations and fill HMV values in preparation for SARIMAX modeling.
-    
-    Args:
-        data: The input DataFrame.
-        lambdas: A dictionary containing the lambda values for Box-Cox transformations.
-        hmvs: A dictionary containing the HMV values for each holiday.
-
-    Returns:
-        A pandas DataFrame containing the transformed data.
-    """
-    try:
-        print("\n[Data Preparation] Applying remaining transformations for SARIMAX...")
-
-        # Apply Box-Cox transformations
-        data['onpromotion'] = boxcox(data['onpromotion'] + 0.01, lambdas['lmbda_onpromotion'])
-        data['transactions'] = boxcox(data['transactions'] + 0.01, lambdas['lmbda_transactions'])
-        data['sales'] = boxcox(data['sales'] + 0.01, lambdas['lmbda_sales'])
-
-        # Fill HMVs
-        ma = data[['date', 'sales']].groupby(['date']).agg({'sales': 'mean'})
-        ma = pd.DataFrame(ma.rolling(window=15, min_periods=15).mean().values, columns=['ma30']).set_index(ma.index)
-        data = data.merge(ma, how='left', on='date')
-        data['hmv'] = 0.0
-        for holiday in data['description'].unique():
-            df = data.loc[data['description'] == holiday, ['date', 'ma30', 'sales']].groupby(['date', 'ma30'], as_index=False).agg(sales=('sales', 'mean'))
-            hmv = hmvs.get(holiday, float((df['sales'] - df['ma30']).mean()))
-            data.loc[data['description'] == holiday, 'hmv'] = ((data['ntl_holiday'] == 1) |
-                                                                (data['rgnl_holiday'] == 1) |
-                                                                (data['lcl_holiday'] == 1)).astype('int8') * hmv
-            
-        data = data.drop(['description', 'ma30'], axis=1)
-        
-        print("✓ Data preparation completed.")
-        return data
-    except Exception as e:
-        error_msg = f"Error during data preparation: {e}"
-        print(f"✗ {error_msg}")
-        raise Exception(error_msg)
-
-
-def build_time_series(data):
-    """Aggregate data to build time series for SARIMAX modeling.
-    
-    Args:
-            data: The input DataFrame.
-    Returns:
-            A tuple containing two dictionaries: (ts_per_family, ts_per_store)
-    """
-    print(f"\n[TIMESERIES] Building aggregated time series per family and store")
-    
-    ts_per_family = {}
-    ts_per_store = {}
-
-    try:
-        # Build time series per family
-        print(f"  Building time series per family...")
-        for f in data['family'].unique():
-            if f in NON_TWO_YEAR_FAMILIES:
-                ts_per_family[f] = data.loc[
-                    (data['date'] > PERIOD_MAP[NON_TWO_YEAR_FAMILIES[f]]) &
-                    (data['family'] == f)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-            elif f in TWO_YEAR_FAMILIES:
-                ts_per_family[f] = data.loc[
-                    (data['date'] > '2015-08-15') & (data['family'] == f)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-        print(f"    ✓ Built time series for {len(ts_per_family)} families")
-        
-        # Build time series per store
-        print(f"  Building time series per store...")
-        for s in range(1, 55):
-            if s in NON_TWO_YEAR_STORES:
-                store_data = data.loc[
-                    (data['date'] > PERIOD_MAP[NON_TWO_YEAR_STORES[s]]) &
-                    (data['store_nbr'] == s)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-            elif s in TWO_YEAR_STORES:
-                store_data = data.loc[
-                    (data['date'] > '2015-08-15') & (data['store_nbr'] == s)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-            else:
-                continue
-            
-            if len(store_data) > 0:
-                ts_per_store[s] = store_data
-        print(f"    ✓ Built time series for {len(ts_per_store)} stores")
-        return ts_per_family, ts_per_store
-        
-    except Exception as e:
-        print(f"  ✗ Error building time series: {e}")
-        return None, None
-    
 
 def load_sarimax_models(s3_client, bucket_name, families, year, biweek_num):
     """Load previously trained SARIMAX models from S3 for the specified year and biweek number.
@@ -259,9 +131,9 @@ def load_sarimax_models(s3_client, bucket_name, families, year, biweek_num):
 
     try:
         if biweek_num == FIRST_BIWEEK:
-            model_prefix = 'sarimax/historical/'
+            model_prefix = SARIMAX_MODEL_HISTORICAL_PREFIX
         else:
-            model_prefix = f"sarimax/biweekly/{year}/BW-{biweek_num - 1}/"
+            model_prefix = biweek_data_prefix(SARIMAX_MODEL_BIWEEKLY_PREFIX, year, biweek_num - 1)
         
         print(f"\n[S3] Downloading SARIMAX models from s3://{bucket_name}/{model_prefix}...")
         # List and download family models
@@ -689,11 +561,14 @@ if __name__ == "__main__":
 
         # Step 5: Prepare data for SARIMAX
         print(f"\n[4/12] Preparing data for SARIMAX...")
-        data = prime_data_for_sarimax(data, lambdas, hmvs)
+        data = apply_prime_transform(data, lambdas, hmvs, rolling_window=15, min_periods=15)
 
         # Step 6: Build time series for SARIMAX
         print(f"\n[5/12] Building time series for SARIMAX...")
-        ts_per_family, ts_per_store = build_time_series(data)
+        try:
+            ts_per_family, ts_per_store = build_time_series(data)
+        except Exception:
+            ts_per_family, ts_per_store = None, None
         if ts_per_family is None or ts_per_store is None:
             error_msg = "Failed to build time series for SARIMAX"
             print(f"✗ {error_msg}")

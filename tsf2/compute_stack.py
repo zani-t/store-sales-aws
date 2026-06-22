@@ -39,7 +39,10 @@ class ComputeStack(Stack):
         # Lambda function
         self.preprocessing_lambda = _lambda.DockerImageFunction(self, "PreprocessingLambda",
             function_name=f"{env_name}-tsf2-preprocessing",
-            code=_lambda.DockerImageCode.from_image_asset("containers/preprocessing"),
+            code=_lambda.DockerImageCode.from_image_asset(
+                ".",
+                file="containers/preprocessing/Dockerfile",
+            ),
             memory_size=3008,
             timeout=Duration.minutes(15),
             environment={
@@ -111,7 +114,10 @@ class ComputeStack(Stack):
 
         # Container
         self.evaluation_container = self.evaluation_task_def.add_container("EvaluationContainer",
-            image=ecs.ContainerImage.from_asset("containers/evaluation"),
+            image=ecs.ContainerImage.from_asset(
+                ".",
+                file="containers/evaluation/Dockerfile",
+            ),
             logging=ecs.LogDriver.aws_logs(
                 log_group=evaluation_log_group,
                 stream_prefix="evaluation"
@@ -150,7 +156,10 @@ class ComputeStack(Stack):
 
         # Container
         self.smx_container = self.smx_retraining_task_def.add_container("SmxRetrainingContainer",
-            image=ecs.ContainerImage.from_asset("containers/smx-training"),
+            image=ecs.ContainerImage.from_asset(
+                ".",
+                file="containers/smx-training/Dockerfile",
+            ),
             logging=ecs.LogDriver.aws_logs(
                 log_group=smx_retraining_log_group,
                 stream_prefix="retraining"
@@ -189,7 +198,10 @@ class ComputeStack(Stack):
 
         # Container
         self.xgbsr_container = self.xgbsr_retraining_task_def.add_container("XGBSRRetrainingContainer",
-            image=ecs.ContainerImage.from_asset("containers/xgb-training"),
+            image=ecs.ContainerImage.from_asset(
+                ".",
+                file="containers/xgb-training/Dockerfile",
+            ),
             logging=ecs.LogDriver.aws_logs(
                 log_group=xgbsr_retraining_log_group,
                 stream_prefix="retraining"

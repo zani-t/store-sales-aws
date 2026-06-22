@@ -17,6 +17,8 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from tsf2.lambda_bundle import lambda_asset_code
+
 class OrchestrationStack(Stack):
 
     def __init__(self, scope: Construct, construct_id: str,
@@ -187,7 +189,7 @@ class OrchestrationStack(Stack):
             removal_policy=removal,
         )
 
-        lambda_code = _lambda.Code.from_asset("lambdas")
+        lambda_code = lambda_asset_code()
         message_group_id = "tsf2-pipeline"
 
         starter_log_group = logs.LogGroup(self, "StarterLogGroup",

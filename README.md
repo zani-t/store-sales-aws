@@ -12,6 +12,7 @@ S3 uploads trigger a serialized job queue that runs one biweek at a time through
 
 | Path | Purpose |
 |------|---------|
+| `tsf2_core/` | Shared constants, transforms, S3 helpers, and biweek calendar |
 | `tsf2/` | AWS CDK stacks (storage, compute, orchestration) |
 | `containers/` | Docker images for preprocessing, training, and evaluation |
 | `lambdas/` | Queue enqueue and Step Functions starter functions |

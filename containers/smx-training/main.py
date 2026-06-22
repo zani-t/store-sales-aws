@@ -5,11 +5,6 @@ Downloads subprime data from S3, applies prime transformations, trains models,
 saves them to S3. Models are stored in <model_bucket>/sarimax/biweekly/<year>/BW-<biweek>/.
 """
 
-import os
-import sys
-import json
-import pickle
-import shutil
 import warnings
 import tempfile
 import datetime
@@ -21,94 +16,38 @@ from decimal import Decimal
 
 import boto3
 import pandas as pd
-import numpy as np
-from scipy.stats import boxcox
+import pickle
+import shutil
+import os
+import sys
+import json
 from botocore.exceptions import ClientError
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tools.sm_exceptions import ValueWarning, ConvergenceWarning
 
-# Suppress warnings
-warnings.filterwarnings('ignore', category=ValueWarning)
-warnings.filterwarnings('ignore', category=ConvergenceWarning)
+from tsf2_core.constants import (
+    FAMILIES_MAPPING_KEY,
+    MARKER,
+    PRIME_BIWEEKLY_PREFIX,
+    SARIMAX_MODEL_BIWEEKLY_PREFIX,
+    SIGNIFICANT_EXOG,
+    SUBPRIME_BIWEEKLY_PREFIX,
+    SUBPRIME_HISTORICAL_PREFIX,
+)
+from tsf2_core.s3 import marker_exists, write_marker
+from tsf2_core.timeseries import build_time_series, family_encode
+from tsf2_core.transforms import fit_prime_transform
 
-# Constants
-MARKER = '_COMPLETE'
-SUBPRIME_INPUT_PREFIX = 'processed/sarimax-subprime/biweekly/'
-PRIME_INPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
-PRIME_OUTPUT_PREFIX = 'processed/sarimax-prime/biweekly/'
-TIMESERIES_FAMILY_PREFIX = 'processed/sarimax-prime/biweekly/'
-TIMESERIES_STORE_PREFIX = 'processed/sarimax-prime/biweekly/'
-SARIMAX_OUTPUT_PREFIX = 'sarimax/biweekly/'
-SIGNIFICANT_EXOG = ['hmv', 'exists_promotion', 'exists_transaction']
+warnings.filterwarnings("ignore", category=ValueWarning)
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-# Time series construction parameters
-PERIOD_MAP = {
-    0.25: '2017-05-15',
-    0.5: '2017-02-15',
-    1: '2016-08-15',
-    1.5: '2016-02-15',
-    2.5: '2015-02-15',
-    3.5: '2014-02-15',
-    4: '2013-01-01'
-}
+SUBPRIME_INPUT_PREFIX = SUBPRIME_BIWEEKLY_PREFIX
+PRIME_OUTPUT_PREFIX = PRIME_BIWEEKLY_PREFIX
+SARIMAX_OUTPUT_PREFIX = SARIMAX_MODEL_BIWEEKLY_PREFIX
 
-NON_TWO_YEAR_FAMILIES = {
-    'BABY CARE': 1.5, 'BOOKS': 0.5, 'LAWN AND GARDEN': 0.5, 'LIQUOR,WINE,BEER': 1,
-    'MAGAZINES': 1.5, 'AUTOMOTIVE': 4, 'BEAUTY': 4, 'BREAD/BAKERY': 4, 'CLEANING': 4,
-    'DAIRY': 3.5, 'DELI': 4, 'EGGS': 4, 'FROZEN FOODS': 4, 'GROCERY I': 4,
-    'GROCERY II': 4, 'LINGERIE': 4, 'MEATS': 4, 'PERSONAL CARE': 4, 'POULTRY': 3.5,
-    'PREPARED FOODS': 4, 'SEAFOOD': 2.5, 'SCHOOL AND OFFICE SUPPLIES': 1
-}
-
-TWO_YEAR_FAMILIES = {
-    'BEVERAGES', 'CELEBRATION', 'HARDWARE', 'HOME AND KITCHEN I', 'HOME AND KITCHEN II',
-    'HOME APPLIANCES', 'HOME CARE', 'LADIESWEAR', 'PET SUPPLIES', 'PLAYERS AND ELECTRONICS', 'PRODUCE'
-}
-
-NON_TWO_YEAR_STORES = {21: 1, 22: 1.5, 25: 0.5, 42: 1.5, 52: 0.25, 53: 1}
-TWO_YEAR_STORES = {*range(1, 21), 23, 24, *range(26, 42), *range(43, 52), 54}
-
-EXOG_FEATURES = {feature: 'mean' for feature in [
-    'sales', 'onpromotion', 'transactions', 'ntl_holiday', 'rgnl_holiday', 'lcl_holiday', 'hmv', 'exists_promotion',
-    'exists_transaction', 'oil_price_status', 'low_oil_price', 'high_oil_price', 'holiday_type_Additional',
-    'holiday_type_Bridge', 'holiday_type_Event', 'holiday_type_Holiday', 'holiday_type_Transfer',
-    'holiday_type_TransferredHoliday', 'holiday_type_Work Day'
-]}
-
-# Temporary directory for local model storage
-TEMP_DIR = Path(tempfile.mkdtemp(prefix='sarimax_biweekly_'))
-FAMILY_DIR = TEMP_DIR / 'family'
-STORE_DIR = TEMP_DIR / 'store'
-
-
-def get_stack_output(env_name, export_name):
-    """Get CloudFormation stack output by export name."""
-    try:
-        cf = boto3.client('cloudformation')
-        response = cf.describe_stacks(StackName=f"{env_name}-StorageStack")
-        outputs = response['Stacks'][0]['Outputs']
-        return next(o['OutputValue'] for o in outputs if o['ExportName'] == export_name)
-    except Exception as e:
-        raise Exception(f"Failed to get stack output '{export_name}': {e}")
-
-
-def marker_exists(s3_client, bucket, prefix):
-    """Check if completion marker exists in S3."""
-    try:
-        s3_client.head_object(Bucket=bucket, Key=f"{prefix}{MARKER}")
-        return True
-    except ClientError:
-        return False
-
-
-def write_marker(s3_client, bucket, prefix):
-    """Write completion marker to S3."""
-    s3_client.put_object(Bucket=bucket, Key=f"{prefix}{MARKER}", Body=b'')
-
-
-def family_encode(name):
-    """Encode family name for use in filenames."""
-    return name.replace(' ', '_').replace('/', '_')
+TEMP_DIR = Path(tempfile.mkdtemp(prefix="sarimax_biweekly_"))
+FAMILY_DIR = TEMP_DIR / "family"
+STORE_DIR = TEMP_DIR / "store"
 
 
 def ensure_directories_exist():
@@ -140,7 +79,7 @@ def load_subprime_data(s3_client, bucket_name, target_year, target_biweek):
         try:
             response = s3_client.get_object(
                 Bucket=bucket_name,
-                Key='processed/sarimax-subprime/historical/data.parquet'
+                Key=f"{SUBPRIME_HISTORICAL_PREFIX}data.parquet"
             )
             hist_data = pd.read_parquet(BytesIO(response['Body'].read()))
             all_data.append(hist_data)
@@ -223,7 +162,7 @@ def load_families_mapping(s3_client, bucket_name):
         try:
             response = s3_client.get_object(
                 Bucket=bucket_name,
-                Key="processed/sarimax-prime/historical/families_mapping.json"
+                Key=FAMILIES_MAPPING_KEY,
             )
             families = json.loads(response['Body'].read().decode('utf-8'))
             print(f"  ✓ Loaded families mapping for {len(families)} families")
@@ -236,97 +175,13 @@ def load_families_mapping(s3_client, bucket_name):
         raise Exception(f"Failed to load jsons from S3: {e}")
 
 
-def prime_data_for_sarimax(data):
-    """Apply Box-Cox transformations and fill HMV values in preparation for SARIMAX modeling."""
-    try:
-        print("\n[TRANSFORM] Applying prime transformations for SARIMAX...")
+def ensure_directories_exist():
+    """Create temporary output directories."""
+    print(f"\n[SETUP] Creating temporary directories")
 
-        # Apply Box-Cox transformations
-        lmbda_sales = boxcox(data.loc[data['sales'] > 0, 'sales'])[1]
-        lmbda_onpromotion = boxcox(data.loc[data['onpromotion'] > 0, 'onpromotion'])[1]
-        lmbda_transactions = boxcox(data.loc[data['transactions'] > 0, 'transactions'])[1]
-
-        data['onpromotion'] = boxcox(data['onpromotion'] + 0.01, lmbda_onpromotion)
-        data['transactions'] = boxcox(data['transactions'] + 0.01, lmbda_transactions)
-        data['sales'] = boxcox(data['sales'] + 0.01, lmbda_sales)
-
-        # Fill HMVs
-        print("  - Computing HMV values...")
-        ma = data[['date', 'sales']].groupby(['date']).agg({'sales': 'mean'})
-        ma = pd.DataFrame(ma.rolling(window=15, min_periods=1).mean().values, columns=['ma15']).set_index(ma.index)
-        data = data.merge(ma, how='left', on='date')
-        data['hmv'] = 0.0
-        hmvs = {}
-        for holiday in data['description'].unique():
-            df = data.loc[data['description'] == holiday, ['date', 'ma15', 'sales']].groupby(
-                ['date', 'ma15'], as_index=False
-            ).agg(sales=('sales', 'mean'))
-            hmv = (df['sales'] - df['ma15']).mean()
-            hmvs[holiday] = float(hmv)
-            data.loc[data['description'] == holiday, 'hmv'] = (
-                ((data['ntl_holiday'] == 1) | (data['rgnl_holiday'] == 1) | (data['lcl_holiday'] == 1)).astype('int8') * hmv
-            )
-        
-        data = data.drop(['description', 'ma15'], axis=1)
-        
-       # Store lambda values for inverse transforms
-        lambdas = {
-            'lmbda_sales': float(lmbda_sales),
-            'lmbda_onpromotion': float(lmbda_onpromotion),
-            'lmbda_transactions': float(lmbda_transactions)
-        }
-        
-        print(f"✓ Prime transformations complete. Final dataset: {len(data)} rows")
-        return data, lambdas, hmvs
-    except Exception as e:
-        raise Exception(f"Error during prime transformations: {e}")
-
-
-def build_time_series(data):
-    """Aggregate data to build time series for SARIMAX modeling."""
-    print(f"\n[TIMESERIES] Building aggregated time series per family and store")
-    
-    ts_per_family = {}
-    ts_per_store = {}
-
-    try:
-        # Build time series per family
-        print(f"  Building time series per family...")
-        for f in data['family'].unique():
-            if f in NON_TWO_YEAR_FAMILIES:
-                ts_per_family[f] = data.loc[
-                    (data['date'] > PERIOD_MAP[NON_TWO_YEAR_FAMILIES[f]]) &
-                    (data['family'] == f)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-            elif f in TWO_YEAR_FAMILIES:
-                ts_per_family[f] = data.loc[
-                    (data['date'] > '2015-08-15') & (data['family'] == f)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-        print(f"    ✓ Built time series for {len(ts_per_family)} families")
-        
-        # Build time series per store
-        print(f"  Building time series per store...")
-        for s in range(1, 55):
-            if s in NON_TWO_YEAR_STORES:
-                store_data = data.loc[
-                    (data['date'] > PERIOD_MAP[NON_TWO_YEAR_STORES[s]]) &
-                    (data['store_nbr'] == s)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-            elif s in TWO_YEAR_STORES:
-                store_data = data.loc[
-                    (data['date'] > '2015-08-15') & (data['store_nbr'] == s)
-                ].groupby(['date']).agg(EXOG_FEATURES)
-            else:
-                continue
-            
-            if len(store_data) > 0:
-                ts_per_store[s] = store_data
-        print(f"    ✓ Built time series for {len(ts_per_store)} stores")
-        
-        return ts_per_family, ts_per_store
-        
-    except Exception as e:
-        raise Exception(f"Error building time series: {e}")
+    for directory in [FAMILY_DIR, STORE_DIR]:
+        directory.mkdir(parents=True, exist_ok=True)
+        print(f"  ✓ {directory}")
 
 
 def train_models(ts_per_family, ts_per_store):
@@ -611,7 +466,7 @@ if __name__ == '__main__':
         
         # Step 4: Apply prime transformations
         print("\n[4/8] Applying prime transformations...")
-        prime_data, lambdas, hmvs = prime_data_for_sarimax(subprime_data)
+        prime_data, lambdas, hmvs = fit_prime_transform(subprime_data)
         
         # Step 5: Upload prime data to S3
         print("\n[5/8] Uploading prime data to S3...")

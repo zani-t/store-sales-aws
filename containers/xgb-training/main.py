@@ -7,7 +7,11 @@ and saves to S3. Output data is stored in <data_bucket>/processed/xgboost-prime/
 and model in <model_bucket>/xgboost/biweekly/<year>/BW-<biweek>/.
 """
 
-from fileinput import filename
+from io import BytesIO
+from decimal import Decimal
+from pathlib import Path
+
+import datetime
 import os
 import sys
 import warnings
@@ -19,54 +23,31 @@ import joblib
 import uuid
 import gc
 from datetime import datetime as dt
-from io import BytesIO
-from decimal import Decimal
-from pathlib import Path
-
-import datetime
 from botocore.exceptions import ClientError
 from sklearn.ensemble import StackingRegressor
 from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
 from statsmodels.tools.sm_exceptions import ValueWarning, ConvergenceWarning
 
-# Suppress warnings
-warnings.filterwarnings('ignore', category=ValueWarning)
-warnings.filterwarnings('ignore', category=ConvergenceWarning)
+from tsf2_core.constants import (
+    MARKER,
+    MODEL_FILENAME,
+    PRIME_BIWEEKLY_PREFIX,
+    SARIMAX_MODEL_BIWEEKLY_PREFIX,
+    SIGNIFICANT_EXOG,
+    XGBOOST_MODEL_BIWEEKLY_PREFIX,
+    XGBOOST_PRIME_BIWEEKLY_PREFIX,
+)
+from tsf2_core.s3 import marker_exists, write_marker
+from tsf2_core.timeseries import load_time_series
 
-# Constants
-MARKER = '_COMPLETE'
-SARIMAX_PRIME_PREFIX = 'processed/sarimax-prime/biweekly/'
-SARIMAX_MODEL_PREFIX = 'sarimax/biweekly/'
-XGBOOST_PRIME_PREFIX = 'processed/xgboost-prime/biweekly/'
-XGBOOST_MODEL_PREFIX = 'xgboost/biweekly/'
-MODEL_FILENAME = 'model.joblib'
-SIGNIFICANT_EXOG = ['hmv', 'exists_promotion', 'exists_transaction']
+warnings.filterwarnings("ignore", category=ValueWarning)
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
-
-def get_stack_output(env_name, export_name):
-    """Get CloudFormation stack output by export name."""
-    try:
-        cf = boto3.client('cloudformation')
-        response = cf.describe_stacks(StackName=f"{env_name}-StorageStack")
-        outputs = response['Stacks'][0]['Outputs']
-        return next(o['OutputValue'] for o in outputs if o['ExportName'] == export_name)
-    except Exception as e:
-        raise Exception(f"Failed to get stack output '{export_name}': {e}")
-
-
-def marker_exists(s3_client, bucket, prefix):
-    """Check if completion marker exists in S3."""
-    try:
-        s3_client.head_object(Bucket=bucket, Key=f"{prefix}{MARKER}")
-        return True
-    except ClientError:
-        return False
-
-
-def write_marker(s3_client, bucket, prefix):
-    """Write completion marker to S3."""
-    s3_client.put_object(Bucket=bucket, Key=f"{prefix}{MARKER}", Body=b'')
+SARIMAX_PRIME_PREFIX = PRIME_BIWEEKLY_PREFIX
+SARIMAX_MODEL_PREFIX = SARIMAX_MODEL_BIWEEKLY_PREFIX
+XGBOOST_PRIME_PREFIX = XGBOOST_PRIME_BIWEEKLY_PREFIX
+XGBOOST_MODEL_PREFIX = XGBOOST_MODEL_BIWEEKLY_PREFIX
 
 
 def load_sarimax_prime_data(s3_client, bucket_name, year, biweek_num):
@@ -143,96 +124,6 @@ def download_sarimax_models(s3_client, model_bucket, year, biweek_num):
         
     except Exception as e:
         raise Exception(f"Failed to download SARIMAX models: {e}")
-
-
-def load_time_series(s3_client, bucket_name):
-    """Load pre-built time series aggregations from S3.
-    
-    Args:
-        s3_client: Boto3 S3 client
-        bucket_name: S3 bucket name
-    
-    Returns:
-        tuple: (ts_per_family dict, ts_per_store dict)
-    """
-    import json
-    import pandas as pd
-
-    print(f"\n[TIMESERIES] Loading time series from S3")
-    
-    ts_per_family = {}
-    ts_per_store = {}
-    
-    try:
-        # Load family name mapping from S3
-        print(f"  Loading family name mapping...")
-        try:
-            response = s3_client.get_object(Bucket=bucket_name, Key='processed/sarimax-prime/historical/families_mapping.json')
-            family_mapping = json.loads(response['Body'].read().decode('utf-8'))
-        except Exception as e:
-            print(f"    Warning: Could not load family mapping: {e}. Aborting.")
-            return None, None
-
-        # Load family time series
-        print(f"  Loading family time series...")
-        paginator = s3_client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=bucket_name, Prefix='processed/sarimax-prime/historical/family/')
-        
-        for page in pages:
-            if 'Contents' not in page:
-                continue
-            for obj in page['Contents']:
-                if obj['Key'].endswith('.parquet'):
-                    try:
-                        response = s3_client.get_object(Bucket=bucket_name, Key=obj['Key'])
-                        ts_data = pd.read_parquet(BytesIO(response['Body'].read()))
-                        # Extract encoded family name from filename and use mapping
-                        encoded_name = obj['Key'].split('/')[-1].replace('.parquet', '')
-                        try:
-                            family_name = family_mapping[encoded_name]
-                        except KeyError:
-                            print(f"  ✗ Error: Encoded family name '{encoded_name}' not found in mapping. Aborting.")
-                            return None, None
-
-                        ts_per_family[family_name] = ts_data
-                    except Exception as e:
-                        print(f"  ✗ Could not load family time series from {obj['Key']}: {e}")
-                        return None, None
-        
-        print(f"    ✓ Loaded {len(ts_per_family)} family time series")
-        
-        # Load store time series
-        print(f"  Loading store time series...")
-        pages = paginator.paginate(Bucket=bucket_name, Prefix='processed/sarimax-prime/historical/store/')
-        
-        for page in pages:
-            if 'Contents' not in page:
-                continue
-            for obj in page['Contents']:
-                if obj['Key'].endswith('.parquet'):
-                    try:
-                        response = s3_client.get_object(Bucket=bucket_name, Key=obj['Key'])
-                        ts_data = pd.read_parquet(BytesIO(response['Body'].read()))
-                        # Extract store number from filename (e.g., "store_01.parquet" -> 1)
-                        filename = obj['Key'].split('/')[-1].replace('.parquet', '')
-                        if filename.startswith('store_'):
-                            store_num = int(filename.split('_')[1])
-                            ts_per_store[store_num] = ts_data
-                        else:
-                            print(f"  ✗ Warning: Unexpected store time series filename '{filename}'. Aborting.")
-                            return None, None
-                        
-                    except Exception as e:
-                        print(f"    Warning: Could not load store time series from {obj['Key']}: {e}")
-                        return None, None
-        
-        print(f"    ✓ Loaded {len(ts_per_store)} store time series")
-        
-        return ts_per_family, ts_per_store
-        
-    except Exception as e:
-        print(f"  ✗ Error loading time series: {e}")
-        return None, None
 
 
 def generate_inferences(ts_per_family, ts_per_store, smx_per_family, smx_per_store):
