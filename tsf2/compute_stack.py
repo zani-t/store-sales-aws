@@ -165,8 +165,8 @@ class ComputeStack(Stack):
 
         # Fargate task definition
         self.smx_retraining_task_def = ecs.FargateTaskDefinition(self, "SmxRetrainingTaskDef",
-            memory_limit_mib=4096,
-            cpu=512,
+            memory_limit_mib=8192,
+            cpu=1024,
         )
 
         # Container
