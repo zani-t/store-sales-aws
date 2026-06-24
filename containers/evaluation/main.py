@@ -446,6 +446,39 @@ def evaluate_xgboost_model(model, X, y, feature_names, lmbda_sales):
         raise Exception(error_msg)
     
 
+def publish_xgboost_rmsle_metric(cloudwatch_client, rmsle, env_name):
+    """Publish XGBoost RMSLE to CloudWatch for dashboard monitoring.
+
+    Args:
+        cloudwatch_client: The CloudWatch client.
+        rmsle: The XGBoost RMSLE value.
+        env_name: The deployment environment (e.g. dev, prod).
+
+    Returns:
+        None
+    """
+    namespace = os.environ.get("METRIC_NAMESPACE", "TSF2/Evaluation")
+    try:
+        cloudwatch_client.put_metric_data(
+            Namespace=namespace,
+            MetricData=[
+                {
+                    "MetricName": "XGBoostRMSLE",
+                    "Value": float(rmsle),
+                    "Unit": "None",
+                    "Dimensions": [
+                        {"Name": "Environment", "Value": env_name},
+                    ],
+                }
+            ],
+        )
+        print(f"✓ Published XGBoost RMSLE metric to CloudWatch ({namespace})")
+    except ClientError as e:
+        error_msg = f"Failed to publish XGBoost RMSLE metric to CloudWatch: {e}"
+        print(f"✗ {error_msg}")
+        raise Exception(error_msg)
+
+
 def save_evaluation_results(dynamodb_resource, job_table_name, model_job_id, year, biweek_num, results):
     """Save evaluation results to DynamoDB with metadata.
     
@@ -541,18 +574,18 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 2: Check for subprime data marker
-        print(f"\n[1/12] Checking for subprime data marker in s3://{data_bucket_name}/{SUBPRIME_INPUT_PREFIX}{year}/BW-{biweek_num}...")
+        print(f"\n[1/13] Checking for subprime data marker in s3://{data_bucket_name}/{SUBPRIME_INPUT_PREFIX}{year}/BW-{biweek_num}...")
         if not marker_exists(s3_client, data_bucket_name, f"{SUBPRIME_INPUT_PREFIX}{year}/BW-{biweek_num}/"):
             error_msg = f"Subprime data marker not found for {year}-BW-{biweek_num}. Ensure that the data processing step has completed successfully."
             print(f"ℹ {error_msg}")
             sys.exit(0)
 
         # Step 3: Load subprime data
-        print(f"\n[2/12] Loading subprime data for {year}-BW-{biweek_num}...")
+        print(f"\n[2/13] Loading subprime data for {year}-BW-{biweek_num}...")
         data = load_subprime_data(s3_client, data_bucket_name, year, biweek_num)
 
         # Step 4: Load previous biweek JSONs (lambdas, HMV values, families mapping)
-        print(f"\n[3/12] Loading previous biweek JSONs...")
+        print(f"\n[3/13] Loading previous biweek JSONs...")
         lambdas, hmvs, families = load_jsons(s3_client, data_bucket_name, year, biweek_num)
         if lambdas is None or hmvs is None or families is None:
             error_msg = "Failed to load necessary JSON files for data preparation"
@@ -560,11 +593,11 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 5: Prepare data for SARIMAX
-        print(f"\n[4/12] Preparing data for SARIMAX...")
+        print(f"\n[4/13] Preparing data for SARIMAX...")
         data = apply_prime_transform(data, lambdas, hmvs, rolling_window=15, min_periods=15)
 
         # Step 6: Build time series for SARIMAX
-        print(f"\n[5/12] Building time series for SARIMAX...")
+        print(f"\n[5/13] Building time series for SARIMAX...")
         try:
             ts_per_family, ts_per_store = build_time_series(data)
         except Exception:
@@ -575,7 +608,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 7: Load SARIMAX models from S3
-        print(f"\n[6/12] Loading SARIMAX models from S3...")
+        print(f"\n[6/13] Loading SARIMAX models from S3...")
         smx_per_family, smx_per_store = load_sarimax_models(s3_client, model_bucket_name, families, year, biweek_num)
         if smx_per_family is None or smx_per_store is None:
             error_msg = "Failed to load SARIMAX models from S3"
@@ -583,7 +616,7 @@ if __name__ == "__main__":
             sys.exit(1)
         
         # Step 8: Generate inferences from SARIMAX models
-        print(f"\n[7/12] Generating inferences from SARIMAX models...")
+        print(f"\n[7/13] Generating inferences from SARIMAX models...")
         forecast_per_family, forecast_per_store = generate_inferences(ts_per_family, ts_per_store, smx_per_family, smx_per_store)
         if forecast_per_family is None or forecast_per_store is None:
             error_msg = "Failed to generate inferences from SARIMAX models"
@@ -591,7 +624,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 9: Evaluate SARIMAX inferences
-        print(f"\n[8/12] Evaluating SARIMAX inferences...")
+        print(f"\n[8/13] Evaluating SARIMAX inferences...")
         evaluation_results = eval_sarimax_inferences(forecast_per_family, forecast_per_store, ts_per_family, ts_per_store)
         if evaluation_results is None:
             error_msg = "Failed to evaluate SARIMAX inferences"
@@ -599,7 +632,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 10: Prepare data for XGBoost
-        print(f"\n[9/12] Preparing data for XGBoost...")
+        print(f"\n[9/13] Preparing data for XGBoost...")
         X, y = prime_data_for_xgboost(data, forecast_per_family, forecast_per_store)
         if X is None or y is None:
             error_msg = "Failed to prepare data for XGBoost"
@@ -607,7 +640,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 11: Load XGBoost model from S3
-        print(f"\n[10/12] Loading XGBoost model from S3...")
+        print(f"\n[10/13] Loading XGBoost model from S3...")
         model, feature_names, model_job_id = load_xgboost_model(dynamodb_resource, s3_client, model_table_name, model_bucket_name)
         if model is None or feature_names is None or model_job_id is None:
             error_msg = "Failed to load XGBoost model from S3 or model job ID from DynamoDB"
@@ -615,15 +648,20 @@ if __name__ == "__main__":
             sys.exit(1)
 
         # Step 12: Evaluate XGBoost model
-        print(f"\n[11/12] Evaluating XGBoost model...")
+        print(f"\n[11/13] Evaluating XGBoost model...")
         xgboost_rmsle = evaluate_xgboost_model(model, X, y, feature_names, lambdas['lmbda_sales'])
         if xgboost_rmsle is None:
             error_msg = "Failed to evaluate XGBoost model"
             print(f"✗ {error_msg}")
             sys.exit(1)
+
+        # Step 12: Publish XGBoost RMSLE to CloudWatch
+        print(f"\n[12/13] Publishing XGBoost RMSLE to CloudWatch...")
+        cloudwatch_client = boto3.client("cloudwatch", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+        publish_xgboost_rmsle_metric(cloudwatch_client, xgboost_rmsle, env_name)
         
         # Step 13: Save evaluation results to DynamoDB
-        print(f"\n[12/12] Saving evaluation results to DynamoDB...")
+        print(f"\n[13/13] Saving evaluation results to DynamoDB...")
         save_evaluation_results(
             dynamodb_resource,
             job_table_name,

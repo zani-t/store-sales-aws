@@ -15,6 +15,9 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+from tsf2.monitoring_stack import METRIC_NAMESPACE
+
+
 class ComputeStack(Stack):
 
     def __init__(self, scope: Construct, construct_id: str,
@@ -124,10 +127,12 @@ class ComputeStack(Stack):
             ),
             environment={
                 "ENV": env_name,
+                "ENVIRONMENT": env_name,
                 "DATA_BUCKET": data_bucket.bucket_name,
                 "MODEL_BUCKET": model_bucket.bucket_name,
                 "JOB_TABLE": job_table.table_name,
                 "MODEL_TABLE": model_table.table_name,
+                "METRIC_NAMESPACE": METRIC_NAMESPACE,
             }
         )
 
@@ -139,6 +144,16 @@ class ComputeStack(Stack):
         # Grant DynamoDB permissions
         job_table.grant_read_write_data(self.evaluation_task_def.task_role)
         model_table.grant_read_write_data(self.evaluation_task_def.task_role)
+
+        self.evaluation_task_def.task_role.add_to_policy(iam.PolicyStatement(
+            actions=["cloudwatch:PutMetricData"],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "cloudwatch:namespace": METRIC_NAMESPACE,
+                }
+            },
+        ))
 
         # ── SARIMAX retraining infrastructure ──
         # Container log group

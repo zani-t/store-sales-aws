@@ -12,8 +12,8 @@ flowchart LR
   Q --> ST[Starter Lambda]
   ST --> SF[Step Functions]
   SF --> PP[Preprocessing]
-  SF --> EV[Evaluation]
-  SF --> SMX[SARIMAX retrain]
+  PP --> EV[Evaluation]
+  PP --> SMX[SARIMAX retrain]
   SMX --> XGB[XGBoost retrain]
 ```
 
@@ -26,6 +26,7 @@ Evaluation and retraining run in parallel after preprocessing. SARIMAX retrainin
 | **StorageStack** | S3 data and model buckets, DynamoDB job and model tables |
 | **ComputeStack** | Preprocessing Lambda, ECS cluster, Fargate task definitions |
 | **OrchestrationStack** | Step Functions state machine, FIFO job queue, orchestration lock table, enqueue/starter Lambdas, EventBridge rules |
+| **MonitoringStack** | CloudWatch dashboard |
 
 Environment is selected via CDK context: `-c env=dev` (default) or `-c env=prod`.
 

@@ -6,6 +6,7 @@ import aws_cdk as cdk
 from tsf2.storage_stack import StorageStack
 from tsf2.compute_stack import ComputeStack
 from tsf2.orchestration_stack import OrchestrationStack
+from tsf2.monitoring_stack import MonitoringStack
 
 
 app = cdk.App()
@@ -48,6 +49,15 @@ orchestration_stack = OrchestrationStack(
     smx_container=compute_stack.smx_container,
     xgbsr_retraining_task_def=compute_stack.xgbsr_retraining_task_def,
     xgbsr_container=compute_stack.xgbsr_container,
+    env=cdk.Environment(
+        account=os.getenv('CDK_DEFAULT_ACCOUNT'),
+        region=os.getenv('CDK_DEFAULT_REGION')
+        )
+    )
+
+MonitoringStack(
+    app, f"{env_name}-MonitoringStack",
+    env_name=env_name,
     env=cdk.Environment(
         account=os.getenv('CDK_DEFAULT_ACCOUNT'),
         region=os.getenv('CDK_DEFAULT_REGION')
