@@ -18,8 +18,8 @@ class MonitoringStack(Stack):
             namespace=METRIC_NAMESPACE,
             metric_name=METRIC_NAME,
             dimensions_map={"Environment": env_name},
-            statistic="Average",
-            period=Duration.days(14),
+            statistic="Maximum",
+            period=Duration.minutes(5),
         )
 
         dashboard = cloudwatch.Dashboard(
